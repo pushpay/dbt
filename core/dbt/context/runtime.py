@@ -1,4 +1,4 @@
-from dbt.utils import get_materialization, add_ephemeral_model_prefix
+from dbt.utils import get_materialization, get_ephemeral_type, add_ephemeral_model_prefix
 
 import dbt.clients.jinja
 import dbt.context.common
@@ -35,6 +35,10 @@ class BaseRefResolver(dbt.context.common.BaseResolver):
         return target_model, name
 
     def create_ephemeral_relation(self, target_model, name):
+        is_subquery = (get_ephemeral_type(target_model) == 'subquery')
+        if is_subquery:
+            return '(\n{}\n)'.format(target_model.compiled_sql)
+            
         self.model.set_cte(target_model.unique_id, None)
         return self.Relation.create(
             type=self.Relation.CTE,
