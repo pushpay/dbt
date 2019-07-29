@@ -4,7 +4,7 @@ import unittest
 from dbt.contracts.graph.parsed import ParsedNode
 from dbt.context import parser, runtime
 import dbt.exceptions
-from test.unit.mock_adapter import adapter_factory
+from .mock_adapter import adapter_factory
 
 
 
@@ -31,6 +31,7 @@ class TestVar(unittest.TestCase):
             config={
                 'enabled': True,
                 'materialized': 'view',
+                'persist_docs': {},
                 'post-hook': [],
                 'pre-hook': [],
                 'vars': {},
@@ -62,7 +63,7 @@ class TestVar(unittest.TestCase):
         self.assertEqual(var('foo', 'bar'), 'bar')
         with self.assertRaises(dbt.exceptions.CompilationException):
             var('foo')
-    
+
     def test_parser_var_default_something(self):
         var = parser.Var(self.model, self.context, overrides={'foo': 'baz'})
         self.assertEqual(var('foo'), 'baz')
@@ -103,6 +104,7 @@ class TestParseWrapper(unittest.TestCase):
 class TestRuntimeWrapper(unittest.TestCase):
     def setUp(self):
         self.mock_config = mock.MagicMock()
+        self.mock_config.quoting = {'database': True, 'schema': True, 'identifier': True}
         adapter_class = adapter_factory()
         self.mock_adapter = adapter_class(self.mock_config)
         self.wrapper = runtime.DatabaseWrapper(self.mock_adapter)

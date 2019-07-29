@@ -96,6 +96,7 @@ class SourceConfigTest(BaseParserTest):
             'materialized': 'something',
             'post-hook': [],
             'pre-hook': ['my pre run hook'],
+            'persist_docs': {},
             'quoting': {},
             'sort': 'my sort key',
             'tags': [],
@@ -121,6 +122,7 @@ class SourceConfigTest(BaseParserTest):
             'column_types': {},
             'enabled': True,
             'materialized': 'something else',
+            'persist_docs': {},
             'post-hook': [],
             'pre-hook': [
                 'my pre run hook',
@@ -141,6 +143,17 @@ class SourceConfigTest(BaseParserTest):
 
         self.assertEqual(used_keys, frozenset(SourceConfig.ConfigKeys))
 
+    def test__source_config_wrong_type(self):
+        # ExtendDict fields should handle non-dict inputs gracefully
+        self.root_project_config.models = {'persist_docs': False}
+        cfg = SourceConfig(self.root_project_config, self.root_project_config,
+                           ['root', 'x'], NodeType.Model)
+
+        with self.assertRaises(dbt.exceptions.CompilationException) as exc:
+            cfg.get_project_config(self.root_project_config)
+
+        self.assertIn('must be a dict', str(exc.exception))
+
 
 class SchemaParserTest(BaseParserTest):
     maxDiff = None
@@ -156,6 +169,7 @@ class SchemaParserTest(BaseParserTest):
         self.model_config = {
             'enabled': True,
             'materialized': 'view',
+            'persist_docs': {},
             'post-hook': [],
             'pre-hook': [],
             'vars': {},
@@ -214,7 +228,8 @@ class SchemaParserTest(BaseParserTest):
             quoting={
                 'schema': True,
                 'identifier': False,
-            }
+            },
+            fqn=['root', 'my_source', 'my_table']
         )
 
         self._expected_source_tests = [
@@ -936,6 +951,7 @@ class ParserTest(BaseParserTest):
         self.model_config = {
             'enabled': True,
             'materialized': 'view',
+            'persist_docs': {},
             'post-hook': [],
             'pre-hook': [],
             'vars': {},
@@ -948,6 +964,7 @@ class ParserTest(BaseParserTest):
         self.disabled_config = {
             'enabled': False,
             'materialized': 'view',
+            'persist_docs': {},
             'post-hook': [],
             'pre-hook': [],
             'vars': {},

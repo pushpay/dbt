@@ -387,6 +387,7 @@ class BaseAdapter(object):
             '`list_schemas` is not implemented for this adapter!'
         )
 
+    @available.parse(lambda *a, **k: False)
     def check_schema_exists(self, database, schema):
         """Check if a schema exists.
 
@@ -542,7 +543,7 @@ class BaseAdapter(object):
         ]
 
     @available.parse_none
-    def valid_archive_target(self, relation):
+    def valid_snapshot_target(self, relation):
         """Ensure that the target relation is valid, by making sure it has the
         expected columns.
 
@@ -552,7 +553,7 @@ class BaseAdapter(object):
         """
         if not isinstance(relation, self.Relation):
             dbt.exceptions.invalid_type_error(
-                method_name='is_existing_old_style_archive',
+                method_name='valid_snapshot_target',
                 arg_name='relation',
                 got_value=relation,
                 expected_type=self.Relation)
@@ -572,19 +573,26 @@ class BaseAdapter(object):
         if missing:
             if extra:
                 msg = (
-                    'Archive target has ("{}") but not ("{}") - is it an '
+                    'Snapshot target has ("{}") but not ("{}") - is it an '
                     'unmigrated previous version archive?'
                     .format('", "'.join(extra), '", "'.join(missing))
                 )
             else:
                 msg = (
-                    'Archive target is not an archive table (missing "{}")'
+                    'Snapshot target is not a snapshot table (missing "{}")'
                     .format('", "'.join(missing))
                 )
             dbt.exceptions.raise_compiler_error(msg)
 
     @available.parse_none
-    def expand_target_column_types(self, temp_table, to_relation):
+    def expand_target_column_types(self, from_relation, to_relation):
+        if not isinstance(from_relation, self.Relation):
+            dbt.exceptions.invalid_type_error(
+                method_name='expand_target_column_types',
+                arg_name='from_relation',
+                got_value=from_relation,
+                expected_type=self.Relation)
+
         if not isinstance(to_relation, self.Relation):
             dbt.exceptions.invalid_type_error(
                 method_name='expand_target_column_types',
@@ -592,14 +600,7 @@ class BaseAdapter(object):
                 got_value=to_relation,
                 expected_type=self.Relation)
 
-        goal = self.Relation.create(
-            database=None,
-            schema=None,
-            identifier=temp_table,
-            type='table',
-            quote_policy=self.config.quoting
-        )
-        self.expand_column_types(goal, to_relation)
+        self.expand_column_types(from_relation, to_relation)
 
     def list_relations(self, database, schema):
         if self._schema_is_cached(database, schema):
@@ -608,7 +609,9 @@ class BaseAdapter(object):
         information_schema = self.Relation.create(
             database=database,
             schema=schema,
-            model_name='').information_schema()
+            model_name='',
+            quote_policy=self.config.quoting
+        ).information_schema()
 
         # we can't build the relations cache because we don't have a
         # manifest so we can't run any operations.
@@ -628,7 +631,7 @@ class BaseAdapter(object):
         if schema is not None and quoting['schema'] is False:
             schema = schema.lower()
 
-        if database is not None and quoting['schema'] is False:
+        if database is not None and quoting['database'] is False:
             database = database.lower()
 
         return filter_null_values({
@@ -877,8 +880,8 @@ class BaseAdapter(object):
             )
         # This causes a reference cycle, as dbt.context.runtime.generate()
         # ends up calling get_adapter, so the import has to be here.
-        import dbt.context.runtime
-        macro_context = dbt.context.runtime.generate_macro(
+        import dbt.context.operation
+        macro_context = dbt.context.operation.generate(
             macro,
             self.config,
             manifest

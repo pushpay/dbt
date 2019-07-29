@@ -1,15 +1,11 @@
 {% macro snowflake__create_table_as(temporary, relation, sql) -%}
-  {% if temporary %}
-    use schema {{ adapter.quote_as_configured(schema, 'schema') }};
-  {% endif %}
-
   {%- set transient = config.get('transient', default=true) -%}
 
-  create {% if temporary -%}
+  create or replace {% if temporary -%}
     temporary
   {%- elif transient -%}
     transient
-  {%- endif %} table {{ relation.include(database=(not temporary), schema=(not temporary)) }}
+  {%- endif %} table {{ relation }}
   as (
     {{ sql }}
   );
@@ -58,6 +54,8 @@
       table_schema as schema,
       case when table_type = 'BASE TABLE' then 'table'
            when table_type = 'VIEW' then 'view'
+           when table_type = 'MATERIALIZED VIEW' then 'materializedview'
+           when table_type = 'EXTERNAL TABLE' then 'externaltable'
            else table_type
       end as table_type
     from {{ information_schema }}.tables
@@ -80,6 +78,10 @@
 
 {% macro snowflake__current_timestamp() -%}
   convert_timezone('UTC', current_timestamp())
+{%- endmacro %}
+
+{% macro snowflake__snapshot_get_time() -%}
+  to_timestamp_ntz({{ current_timestamp() }})
 {%- endmacro %}
 
 

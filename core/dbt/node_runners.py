@@ -343,7 +343,8 @@ class ModelRunner(CompileRunner):
         materialization_macro.generator(context)()
 
         # we must have built a new model, add it to the cache
-        relation = self.adapter.Relation.create_from_node(self.config, model)
+        relation = self.adapter.Relation.create_from_node(self.config, model,
+                                                          dbt_created=True)
         self.adapter.cache_new_relation(relation)
 
         result = context['load_result']('main')
@@ -484,17 +485,13 @@ class TestRunner(CompileRunner):
         self.print_result_line(result)
 
 
-class ArchiveRunner(ModelRunner):
+class SnapshotRunner(ModelRunner):
     def describe_node(self):
-        cfg = self.node.get('config', {})
-        return (
-            "archive {name} --> {target_database}.{target_schema}.{name}"
-            .format(name=self.node.name, **cfg)
-        )
+        return "snapshot {}".format(self.node.name)
 
     def print_result_line(self, result):
-        dbt.ui.printer.print_archive_result_line(result, self.node_index,
-                                                 self.num_nodes)
+        dbt.ui.printer.print_snapshot_result_line(result, self.node_index,
+                                                  self.num_nodes)
 
 
 class SeedRunner(ModelRunner):

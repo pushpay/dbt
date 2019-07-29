@@ -12,7 +12,7 @@ from dbt.logger import log_to_stderr
 class ListTask(GraphRunnableTask):
     DEFAULT_RESOURCE_VALUES = frozenset((
         NodeType.Model,
-        NodeType.Archive,
+        NodeType.Snapshot,
         NodeType.Seed,
         NodeType.Test,
         NodeType.Source,
@@ -60,10 +60,11 @@ class ListTask(GraphRunnableTask):
 
     def generate_selectors(self):
         for node in self._iterate_selected_nodes():
+            selector = '.'.join(node.fqn)
             if node.resource_type == NodeType.Source:
-                yield 'source:{}'.format(node.unique_id)
+                yield 'source:{}'.format(selector)
             else:
-                yield node.unique_id
+                yield selector
 
     def generate_names(self):
         for node in self._iterate_selected_nodes():

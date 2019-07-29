@@ -91,8 +91,9 @@ class BigQueryAdapter(BaseAdapter):
         client = conn.handle
 
         with self.connections.exception_handler('list dataset'):
+            # this is similar to how we have to deal with listing tables
             all_datasets = client.list_datasets(project=database,
-                                                include_all=True)
+                                                max_results=10000)
             return [ds.dataset_id for ds in all_datasets]
 
     @available
@@ -342,22 +343,6 @@ class BigQueryAdapter(BaseAdapter):
             raise dbt.exceptions.RuntimeException(msg, model)
 
         return res
-
-    @available.parse(_stub_relation)
-    def create_temporary_table(self, sql, **kwargs):
-        # BQ queries always return a temp table with their results
-        query_job, _ = self.connections.raw_execute(sql)
-        bq_table = query_job.destination
-
-        return self.Relation.create(
-            database=bq_table.project,
-            schema=bq_table.dataset_id,
-            identifier=bq_table.table_id,
-            quote_policy={
-                'schema': True,
-                'identifier': True
-            },
-            type=BigQueryRelation.Table)
 
     @available.parse_none
     def alter_table_add_columns(self, relation, columns):
