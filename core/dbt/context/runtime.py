@@ -38,7 +38,7 @@ class BaseRefResolver(dbt.context.common.BaseResolver):
         is_subquery = (get_ephemeral_type(target_model) == 'subquery')
         if is_subquery:
             return '(\n{}\n)'.format(target_model.compiled_sql)
-            
+
         self.model.set_cte(target_model.unique_id, None)
         return self.Relation.create(
             type=self.Relation.CTE,
