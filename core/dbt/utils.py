@@ -244,6 +244,10 @@ class AttrDict(dict):
         self.__dict__ = self
 
 
+def get_ephemeral_type(node):
+    return node.config.ephemeral_type
+
+
 def is_enabled(node):
     return node.config.enabled
 

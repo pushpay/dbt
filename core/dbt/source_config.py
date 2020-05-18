@@ -18,6 +18,7 @@ class SourceConfig:
         'unique_key',
         'database',
         'severity',
+        'ephemeral_type',
         'sql_header',
         'incremental_strategy',
 

@@ -38,7 +38,7 @@ from dbt.node_types import NodeType
 from dbt.source_config import SourceConfig
 
 from dbt.utils import (
-    add_ephemeral_model_prefix, merge, AttrDict
+    add_ephemeral_model_prefix, merge, AttrDict, get_ephemeral_type
 )
 
 import agate
@@ -327,6 +327,10 @@ class RuntimeRefResolver(BaseRefResolver):
     def create_ephemeral_relation(
         self, target_model: NonSourceNode, name: str
     ) -> RelationProxy:
+        is_subquery = (get_ephemeral_type(target_model) == 'subquery')
+        if is_subquery:
+            return '(\n{}\n)'.format(target_model.compiled_sql)
+
         self.model.set_cte(target_model.unique_id, None)
         return self.Relation.create(
             type=self.Relation.CTE,
