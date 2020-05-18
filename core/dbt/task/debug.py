@@ -2,6 +2,7 @@
 import os
 import platform
 import sys
+from typing import Optional, Dict, Any, List
 
 from dbt.logger import GLOBAL_LOGGER as logger
 import dbt.clients.system
@@ -9,13 +10,15 @@ import dbt.config
 import dbt.utils
 import dbt.exceptions
 from dbt.links import ProfileConfigDocs
-from dbt.adapters.factory import get_adapter
+from dbt.adapters.factory import get_adapter, register_adapter
 from dbt.version import get_installed_version
-from dbt.config import Project, Profile
+from dbt.config import Project, Profile, ConfigRenderer
+from dbt.context.base import generate_base_context
+from dbt.context.target import generate_target_context
 from dbt.clients.yaml_helper import load_yaml_text
 from dbt.ui.printer import green, red
 
-from dbt.task.base import BaseTask
+from dbt.task.base import BaseTask, get_nearest_project_dir
 
 PROFILE_DIR_MESSAGE = """To view your profiles.yml file, run:
 
@@ -57,25 +60,40 @@ documentation:
 FILE_NOT_FOUND = 'file not found'
 
 
+class QueryCommentedProfile(Profile):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.query_comment = None
+
+
 class DebugTask(BaseTask):
     def __init__(self, args, config):
-        super(DebugTask, self).__init__(args, config)
+        super().__init__(args, config)
         self.profiles_dir = getattr(self.args, 'profiles_dir',
                                     dbt.config.PROFILES_DIR)
         self.profile_path = os.path.join(self.profiles_dir, 'profiles.yml')
-        self.project_path = os.path.join(os.getcwd(), 'dbt_project.yml')
+        try:
+            self.project_dir = get_nearest_project_dir(self.args)
+        except dbt.exceptions.Exception:
+            # we probably couldn't find a project directory. Set project dir
+            # to whatever was given, or default to the current directory.
+            if args.project_dir:
+                self.project_dir = args.project_dir
+            else:
+                self.project_dir = os.getcwd()
+        self.project_path = os.path.join(self.project_dir, 'dbt_project.yml')
         self.cli_vars = dbt.utils.parse_cli_vars(
             getattr(self.args, 'vars', '{}')
         )
 
         # set by _load_*
-        self.profile = None
+        self.profile: Optional[Profile] = None
         self.profile_fail_details = ''
-        self.raw_profile_data = None
-        self.profile_name = None
-        self.project = None
+        self.raw_profile_data: Optional[Dict[str, Any]] = None
+        self.profile_name: Optional[str] = None
+        self.project: Optional[Project] = None
         self.project_fail_details = ''
-        self.messages = []
+        self.messages: List[str] = []
 
     @property
     def project_profile(self):
@@ -104,6 +122,7 @@ class DebugTask(BaseTask):
         print('python path: {}'.format(sys.executable))
         print('os info: {}'.format(platform.platform()))
         print('Using profiles.yml file at {}'.format(self.profile_path))
+        print('Using dbt_project.yml file at {}'.format(self.project_path))
         print('')
         self.test_configuration()
         self.test_dependencies()
@@ -118,8 +137,16 @@ class DebugTask(BaseTask):
             self.project_fail_details = FILE_NOT_FOUND
             return red('ERROR not found')
 
+        if self.profile is None:
+            ctx = generate_base_context(self.cli_vars)
+        else:
+            ctx = generate_target_context(self.profile, self.cli_vars)
+
+        renderer = ConfigRenderer(ctx)
+
         try:
-            self.project = Project.from_current_directory(self.cli_vars)
+            self.project = Project.from_project_root(self.project_dir,
+                                                     renderer)
         except dbt.exceptions.DbtConfigError as exc:
             self.project_fail_details = str(exc)
             return red('ERROR invalid')
@@ -129,6 +156,7 @@ class DebugTask(BaseTask):
     def _profile_found(self):
         if not self.raw_profile_data:
             return red('ERROR not found')
+        assert self.raw_profile_data is not None
         if self.profile_name in self.raw_profile_data:
             return green('OK found')
         else:
@@ -139,6 +167,10 @@ class DebugTask(BaseTask):
                         self.target_name)
         if not requirements:
             return red('ERROR not found')
+        # mypy appeasement, we checked just above
+        assert self.raw_profile_data is not None
+        assert self.profile_name is not None
+        assert self.target_name is not None
         if self.profile_name not in self.raw_profile_data:
             return red('ERROR not found')
         profiles = self.raw_profile_data[self.profile_name]['outputs']
@@ -146,47 +178,63 @@ class DebugTask(BaseTask):
             return red('ERROR not found')
         return green('OK found')
 
-    def _choose_profile_name(self):
-        assert self.project or self.project_fail_details, \
-            '_load_project() required'
+    def _choose_profile_names(self) -> Optional[List[str]]:
+        project_profile: Optional[str] = None
+        if os.path.exists(self.project_path):
+            try:
+                partial = Project.partial_load(
+                    os.path.dirname(self.project_path)
+                )
+                renderer = ConfigRenderer(generate_base_context(self.cli_vars))
+                project_profile = partial.render_profile_name(renderer)
+            except dbt.exceptions.DbtProjectError:
+                pass
 
-        project_profile = None
-        if self.project:
-            project_profile = self.project.profile_name
-
-        args_profile = getattr(self.args, 'profile', None)
+        args_profile: Optional[str] = getattr(self.args, 'profile', None)
 
         try:
-            return Profile.pick_profile_name(args_profile, project_profile)
+            return [Profile.pick_profile_name(args_profile, project_profile)]
         except dbt.exceptions.DbtConfigError:
             pass
         # try to guess
 
+        profiles = []
         if self.raw_profile_data:
             profiles = [k for k in self.raw_profile_data if k != 'config']
-            if len(profiles) == 0:
+            if project_profile is None:
+                self.messages.append('Could not load dbt_project.yml')
+            elif len(profiles) == 0:
                 self.messages.append('The profiles.yml has no profiles')
             elif len(profiles) == 1:
                 self.messages.append(ONLY_PROFILE_MESSAGE.format(profiles[0]))
-                return profiles[0]
             else:
                 self.messages.append(MULTIPLE_PROFILE_MESSAGE.format(
                     '\n'.join(' - {}'.format(o) for o in profiles)
                 ))
-        return None
+        return profiles
 
-    def _choose_target_name(self):
-        has_raw_profile = (self.raw_profile_data and self.profile_name and
-                           self.profile_name in self.raw_profile_data)
-        if has_raw_profile:
-            raw_profile = self.raw_profile_data[self.profile_name]
+    def _choose_target_name(self, profile_name: str):
+        has_raw_profile = (
+            self.raw_profile_data is not None and
+            profile_name in self.raw_profile_data
+        )
 
-            target_name, _ = Profile.render_profile(
-                raw_profile, self.profile_name,
-                getattr(self.args, 'target', None), self.cli_vars
-            )
-            return target_name
-        return None
+        if not has_raw_profile:
+            return None
+
+        # mypy appeasement, we checked just above
+        assert self.raw_profile_data is not None
+        raw_profile = self.raw_profile_data[profile_name]
+
+        renderer = ConfigRenderer(generate_base_context(self.cli_vars))
+
+        target_name, _ = Profile.render_profile(
+            raw_profile=raw_profile,
+            profile_name=profile_name,
+            target_override=getattr(self.args, 'target', None),
+            renderer=renderer
+        )
+        return target_name
 
     def _load_profile(self):
         if not os.path.exists(self.profile_path):
@@ -206,14 +254,25 @@ class DebugTask(BaseTask):
             if isinstance(raw_profile_data, dict):
                 self.raw_profile_data = raw_profile_data
 
-        self.profile_name = self._choose_profile_name()
-        self.target_name = self._choose_target_name()
-        try:
-            self.profile = Profile.from_args(self.args, self.profile_name)
-        except dbt.exceptions.DbtConfigError as exc:
-            self.profile_fail_details = str(exc)
-            return red('ERROR invalid')
+        profile_errors = []
+        profile_names = self._choose_profile_names()
+        renderer = ConfigRenderer(generate_base_context(self.cli_vars))
+        for profile_name in profile_names:
+            try:
+                profile: Profile = QueryCommentedProfile.render_from_args(
+                    self.args, renderer, profile_name
+                )
+            except dbt.exceptions.DbtConfigError as exc:
+                profile_errors.append(str(exc))
+            else:
+                if len(profile_names) == 1:
+                    # if a profile was specified, set it on the task
+                    self.target_name = self._choose_target_name(profile_name)
+                    self.profile = profile
 
+        if profile_errors:
+            self.profile_fail_details = '\n\n'.join(profile_errors)
+            return red('ERROR invalid')
         return green('OK found and valid')
 
     def test_git(self):
@@ -230,8 +289,8 @@ class DebugTask(BaseTask):
         print('')
 
     def test_configuration(self):
-        project_status = self._load_project()
         profile_status = self._load_profile()
+        project_status = self._load_project()
         print('Configuration:')
         print('  profiles.yml file [{}]'.format(profile_status))
         print('  dbt_project.yml file [{}]'.format(project_status))
@@ -259,22 +318,32 @@ class DebugTask(BaseTask):
             return
         if self.profile_fail_details == FILE_NOT_FOUND:
             return
-        if self.profile_name is None:
-            return  # we expect an error (no profile provided)
         print('Profile loading failed for the following reason:')
         print(self.profile_fail_details)
         print('')
 
-    def _connection_result(self):
-        adapter = get_adapter(self.profile)
+    @staticmethod
+    def attempt_connection(profile):
+        """Return a string containing the error message, or None if there was
+        no error.
+        """
+        register_adapter(profile)
+        adapter = get_adapter(profile)
         try:
             with adapter.connection_named('debug'):
                 adapter.execute('select 1 as id')
         except Exception as exc:
-            self.messages.append(COULD_NOT_CONNECT_MESSAGE.format(
+            return COULD_NOT_CONNECT_MESSAGE.format(
                 err=str(exc),
-                url=ProfileConfigDocs
-            ))
+                url=ProfileConfigDocs,
+            )
+
+        return None
+
+    def _connection_result(self):
+        result = self.attempt_connection(self.profile)
+        if result is not None:
+            self.messages.append(result)
             return red('ERROR')
         return green('OK connection ok')
 
@@ -286,3 +355,28 @@ class DebugTask(BaseTask):
             print('  {}: {}'.format(k, v))
         print('  Connection test: {}'.format(self._connection_result()))
         print('')
+
+    @classmethod
+    def validate_connection(cls, target_dict):
+        """Validate a connection dictionary. On error, raises a DbtConfigError.
+        """
+        target_name = 'test'
+        # make a fake profile that we can parse
+        profile_data = {
+            'outputs': {
+                target_name: target_dict,
+            },
+        }
+        # this will raise a DbtConfigError on failure
+        profile = Profile.from_raw_profile_info(
+            raw_profile=profile_data,
+            profile_name='',
+            target_override=target_name,
+            renderer=ConfigRenderer(generate_base_context({})),
+        )
+        result = cls.attempt_connection(profile)
+        if result is not None:
+            raise dbt.exceptions.DbtProfileError(
+                result,
+                result_type='connection_failure'
+            )

@@ -1,19 +1,18 @@
+from typing import Optional
+
 from dbt.logger import GLOBAL_LOGGER as logger
 from dbt import version as dbt_version
 from snowplow_tracker import Subject, Tracker, Emitter, logger as sp_logger
 from snowplow_tracker import SelfDescribingJson
 from datetime import datetime
 
-from dbt.adapters.factory import get_adapter
-
+import logbook
 import pytz
 import platform
 import uuid
 import requests
 import yaml
 import os
-
-import dbt.clients.system
 
 sp_logger.setLevel(100)
 
@@ -32,10 +31,13 @@ DBT_INVOCATION_ENV = 'DBT_INVOCATION_ENV'
 
 class TimeoutEmitter(Emitter):
     def __init__(self):
-        super(TimeoutEmitter, self).__init__(COLLECTOR_URL,
-                                             protocol=COLLECTOR_PROTOCOL,
-                                             buffer_size=1,
-                                             on_failure=self.handle_failure)
+        super().__init__(
+            COLLECTOR_URL, protocol=COLLECTOR_PROTOCOL,
+            buffer_size=30, on_failure=self.handle_failure,
+            method='post',
+            # don't set this.
+            byte_limit=None,
+        )
 
     @staticmethod
     def handle_failure(num_ok, unsent):
@@ -44,26 +46,46 @@ class TimeoutEmitter(Emitter):
         logger.warning('Error sending message, disabling tracking')
         do_not_track()
 
-    def http_get(self, payload):
-        sp_logger.info("Sending GET request to %s..." % self.endpoint)
-        sp_logger.debug("Payload: %s" % payload)
-        r = requests.get(self.endpoint, params=payload, timeout=5.0)
+    def _log_request(self, request, payload):
+        sp_logger.info(f"Sending {request} request to {self.endpoint}...")
+        sp_logger.debug(f"Payload: {payload}")
 
-        msg = "GET request finished with status code: " + str(r.status_code)
-        if self.is_good_status_code(r.status_code):
+    def _log_result(self, request, status_code):
+        msg = f"{request} request finished with status code: {status_code}"
+        if self.is_good_status_code(status_code):
             sp_logger.info(msg)
         else:
-            sp_logger.warn(msg)
+            sp_logger.warning(msg)
+
+    def http_post(self, payload):
+        self._log_request('POST', payload)
+
+        r = requests.post(
+            self.endpoint,
+            data=payload,
+            headers={'content-type': 'application/json; charset=utf-8'},
+            timeout=5.0
+        )
+
+        self._log_result('GET', r.status_code)
+        return r
+
+    def http_get(self, payload):
+        self._log_request('GET', payload)
+
+        r = requests.get(self.endpoint, params=payload, timeout=5.0)
+
+        self._log_result('GET', r.status_code)
         return r
 
 
 emitter = TimeoutEmitter()
-tracker = Tracker(emitter, namespace="cf", app_id="dbt")
+tracker = Tracker(
+    emitter, namespace="cf", app_id="dbt",
+)
 
-active_user = None
 
-
-class User(object):
+class User:
 
     def __init__(self, cookie_dir):
         self.do_not_track = True
@@ -91,12 +113,22 @@ class User(object):
         tracker.set_subject(subject)
 
     def set_cookie(self):
+        # If the user points dbt to a profile directory which exists AND
+        # contains a profiles.yml file, then we can set a cookie. If the
+        # specified folder does not exist, or if there is not a profiles.yml
+        # file in this folder, then an inconsistent cookie can be used. This
+        # will change in every dbt invocation until the user points to a
+        # profile dir file which contains a valid profiles.yml file.
+        #
+        # See: https://github.com/fishtown-analytics/dbt/issues/1645
+
         user = {"id": str(uuid.uuid4())}
 
-        dbt.clients.system.make_directory(self.cookie_dir)
-
-        with open(self.cookie_path, "w") as fh:
-            yaml.dump(user, fh)
+        cookie_path = os.path.abspath(self.cookie_dir)
+        profiles_file = os.path.join(cookie_path, 'profiles.yml')
+        if os.path.exists(cookie_path) and os.path.exists(profiles_file):
+            with open(self.cookie_path, "w") as fh:
+                yaml.dump(user, fh)
 
         return user
 
@@ -114,13 +146,16 @@ class User(object):
         return user
 
 
+active_user: Optional[User] = None
+
+
 def get_run_type(args):
     return 'regular'
 
 
 def get_invocation_context(user, config, args):
     try:
-        adapter_type = get_adapter(config).type()
+        adapter_type = config.credentials.type
     except Exception:
         adapter_type = None
 
@@ -232,6 +267,8 @@ def track_invocation_start(config=None, args=None):
 
 def track_model_run(options):
     context = [SelfDescribingJson(RUN_MODEL_SPEC, options)]
+    assert active_user is not None, \
+        'Cannot track model runs when active user is None'
 
     track(
         active_user,
@@ -244,6 +281,8 @@ def track_model_run(options):
 
 def track_rpc_request(options):
     context = [SelfDescribingJson(RPC_REQUEST_SPEC, options)]
+    assert active_user is not None, \
+        'Cannot track rpc requests when active user is None'
 
     track(
         active_user,
@@ -256,6 +295,9 @@ def track_rpc_request(options):
 
 def track_package_install(options):
     context = [SelfDescribingJson(PACKAGE_INSTALL_SPEC, options)]
+    assert active_user is not None, \
+        'Cannot track package installs when active user is None'
+
     track(
         active_user,
         category="dbt",
@@ -275,6 +317,10 @@ def track_invocation_end(
         get_platform_context(),
         get_dbt_env_context()
     ]
+
+    assert active_user is not None, \
+        'Cannot track invocation end when active user is None'
+
     track(
         active_user,
         category="dbt",
@@ -287,6 +333,8 @@ def track_invocation_end(
 def track_invalid_invocation(
         config=None, args=None, result_type=None
 ):
+    assert active_user is not None, \
+        'Cannot track invalid invocations when active user is None'
 
     user = active_user
     invocation_context = get_invocation_invalid_context(
@@ -330,3 +378,15 @@ def initialize_tracking(cookie_dir):
         logger.debug('Got an exception trying to initialize tracking',
                      exc_info=True)
         active_user = User(None)
+
+
+class InvocationProcessor(logbook.Processor):
+    def __init__(self):
+        super().__init__()
+
+    def process(self, record):
+        if active_user is not None:
+            record.extra.update({
+                "run_started_at": active_user.run_started_at.isoformat(),
+                "invocation_id": active_user.invocation_id,
+            })

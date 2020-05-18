@@ -1,4 +1,4 @@
-{% macro snowflake__get_merge_sql(target, source_sql, unique_key, dest_columns) -%}
+{% macro snowflake__get_merge_sql(target, source_sql, unique_key, dest_columns, predicates) -%}
 
     {#
        Workaround for Snowflake not being happy with a merge on a constant-false predicate.
@@ -6,7 +6,7 @@
        is provided, then this macro will do a proper merge instead.
     #}
 
-    {%- set dest_cols_csv = dest_columns | map(attribute="name") | join(', ') -%}
+    {%- set dest_cols_csv = get_quoted_csv(dest_columns | map(attribute='name')) -%}
 
     {%- if unique_key is none -%}
 
@@ -18,7 +18,7 @@
 
     {%- else -%}
 
-        {{ common_get_merge_sql(target, source_sql, unique_key, dest_columns) }}
+        {{ default__get_merge_sql(target, source_sql, unique_key, dest_columns, predicates) }}
 
     {%- endif -%}
 

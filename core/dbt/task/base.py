@@ -1,16 +1,16 @@
-from abc import ABCMeta, abstractmethod
 import os
+from abc import ABCMeta, abstractmethod
+from typing import Type, Union
 
-import six
-
+from dbt.adapters.factory import register_adapter
 from dbt.config import RuntimeConfig, Project
 from dbt.config.profile import read_profile, PROFILES_DIR
 from dbt import tracking
-from dbt.logger import GLOBAL_LOGGER as logger
+from dbt.logger import GLOBAL_LOGGER as logger, log_manager
 import dbt.exceptions
 
 
-class NoneConfig(object):
+class NoneConfig:
     @classmethod
     def from_args(cls, args):
         return None
@@ -38,17 +38,20 @@ https://docs.getdbt.com/docs/configure-your-profile
 """
 
 
-@six.add_metaclass(ABCMeta)
-class BaseTask(object):
-    ConfigType = NoneConfig
+class BaseTask(metaclass=ABCMeta):
+    ConfigType: Union[Type[NoneConfig], Type[Project]] = NoneConfig
 
     def __init__(self, args, config):
         self.args = args
         self.config = config
 
     @classmethod
-    def pre_init_hook(cls):
+    def pre_init_hook(cls, args):
         """A hook called before the task is initialized."""
+        if args.log_format == 'json':
+            log_manager.format_json()
+        else:
+            log_manager.format_text()
 
     @classmethod
     def from_args(cls, args):
@@ -61,7 +64,7 @@ class BaseTask(object):
             tracking.track_invalid_invocation(
                 args=args,
                 result_type=exc.result_type)
-            raise dbt.exceptions.RuntimeException('Could not run dbt')
+            raise dbt.exceptions.RuntimeException('Could not run dbt') from exc
         except dbt.exceptions.DbtProfileError as exc:
             logger.error("Encountered an error while reading profiles:")
             logger.error("  ERROR {}".format(str(exc)))
@@ -81,7 +84,7 @@ class BaseTask(object):
             tracking.track_invalid_invocation(
                 args=args,
                 result_type=exc.result_type)
-            raise dbt.exceptions.RuntimeException('Could not run dbt')
+            raise dbt.exceptions.RuntimeException('Could not run dbt') from exc
         return cls(args, config)
 
     @abstractmethod
@@ -125,16 +128,14 @@ def move_to_nearest_project_dir(args):
     os.chdir(nearest_project_dir)
 
 
-class RequiresProjectTask(BaseTask):
+class ConfiguredTask(BaseTask):
+    ConfigType = RuntimeConfig
+
+    def __init__(self, args, config):
+        super().__init__(args, config)
+        register_adapter(self.config)
+
     @classmethod
     def from_args(cls, args):
         move_to_nearest_project_dir(args)
-        return super(RequiresProjectTask, cls).from_args(args)
-
-
-class ConfiguredTask(RequiresProjectTask):
-    ConfigType = RuntimeConfig
-
-
-class ProjectOnlyTask(RequiresProjectTask):
-    ConfigType = Project
+        return super().from_args(args)

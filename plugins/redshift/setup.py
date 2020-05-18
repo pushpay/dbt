@@ -1,10 +1,20 @@
 #!/usr/bin/env python
-from setuptools import find_packages
-from distutils.core import setup
 import os
+import sys
+
+from setuptools import setup
+try:
+    from setuptools import find_namespace_packages
+except ImportError:
+    # the user has a downlevel version of setuptools.
+    print('Error: dbt requires setuptools v40.1.0 or higher.')
+    print('Please upgrade setuptools with "pip install --upgrade setuptools" '
+          'and try again')
+    sys.exit(1)
+
 
 package_name = "dbt-redshift"
-package_version = "0.14.0rc1"
+package_version = "0.16.1"
 description = """The redshift adapter plugin for dbt (data build tool)"""
 
 this_directory = os.path.abspath(os.path.dirname(__file__))
@@ -20,7 +30,7 @@ setup(
     author="Fishtown Analytics",
     author_email="info@fishtownanalytics.com",
     url="https://github.com/fishtown-analytics/dbt",
-    packages=find_packages(),
+    packages=find_namespace_packages(include=['dbt', 'dbt.*']),
     package_data={
         'dbt': [
             'include/redshift/dbt_project.yml',
@@ -31,8 +41,22 @@ setup(
     install_requires=[
         'dbt-core=={}'.format(package_version),
         'dbt-postgres=={}'.format(package_version),
-        'boto3>=1.6.23,<1.10.0',
-        'botocore>=1.9.23,<1.13.0',
-        'psycopg2>=2.7.5,<2.8',
-    ]
+        # match snowflake-connector-python supported ranges
+        'boto3>=1.4.4,<1.12',
+        'botocore>=1.5.0,<1.15',
+    ],
+    zip_safe=False,
+    classifiers=[
+        'Development Status :: 5 - Production/Stable',
+
+        'License :: OSI Approved :: Apache Software License',
+
+        'Operating System :: Microsoft :: Windows',
+        'Operating System :: MacOS :: MacOS X',
+        'Operating System :: POSIX :: Linux',
+
+        'Programming Language :: Python :: 3.6',
+        'Programming Language :: Python :: 3.7',
+        'Programming Language :: Python :: 3.8',
+    ],
 )

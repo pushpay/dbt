@@ -1,8 +1,36 @@
 version: 2
 jobs:
   unit:
+    docker: &test_only
+      - image: fishtownjacob/test-container:4
+        environment:
+          DBT_INVOCATION_ENV: circle
+    steps:
+      - checkout
+      - run: tox -e flake8,mypy,unit-py36,unit-py38
+  build-wheels:
+    docker: *test_only
+    steps:
+      - checkout
+      - run:
+          name: Build wheels
+          command: |
+            python3.8 -m venv "${PYTHON_ENV}"
+            export PYTHON_BIN="${PYTHON_ENV}/bin/python"
+            $PYTHON_BIN -m pip install -U pip setuptools
+            $PYTHON_BIN -m pip install -r requirements.txt
+            $PYTHON_BIN -m pip install -r dev_requirements.txt
+            /bin/bash ./scripts/build-wheels.sh
+          environment:
+            PYTHON_ENV: /home/tox/build_venv/
+      - store_artifacts:
+          path: ./dist
+          destination: dist
+  integration-postgres-py36:
     docker: &test_and_postgres
-      - image: fishtownjacob/test-container
+      - image: fishtownjacob/test-container:4
+        environment:
+          DBT_INVOCATION_ENV: circle
       - image: postgres
         name: database
         environment: &pgenv
@@ -19,20 +47,13 @@ jobs:
             PGUSER: root
             PGPASSWORD: password
             PGDATABASE: postgres
-      - run: tox -e flake8,unit-py27,unit-py36
-  integration-postgres-py36:
-    docker: *test_and_postgres
-    steps:
-      - checkout
-      - run: *setupdb
       - run:
           name: Run tests
           command: tox -e integration-postgres-py36
       - store_artifacts:
           path: ./logs
   integration-snowflake-py36:
-    docker: &test_only
-      - image: fishtownjacob/test-container
+    docker: *test_only
     steps:
       - checkout
       - run:
@@ -59,42 +80,42 @@ jobs:
           command: tox -e integration-bigquery-py36
       - store_artifacts:
           path: ./logs
-  integration-postgres-py27:
+  integration-postgres-py38:
     docker: *test_and_postgres
     steps:
       - checkout
       - run: *setupdb
       - run:
           name: Run tests
-          command: tox -e integration-postgres-py27
+          command: tox -e integration-postgres-py38
       - store_artifacts:
           path: ./logs
-  integration-snowflake-py27:
+  integration-snowflake-py38:
     docker: *test_only
     steps:
       - checkout
       - run:
           name: Run tests
-          command: tox -e integration-snowflake-py27
+          command: tox -e integration-snowflake-py38
           no_output_timeout: 1h
       - store_artifacts:
           path: ./logs
-  integration-redshift-py27:
+  integration-redshift-py38:
     docker: *test_only
     steps:
       - checkout
       - run:
           name: Run tests
-          command: tox -e integration-redshift-py27
+          command: tox -e integration-redshift-py38
       - store_artifacts:
           path: ./logs
-  integration-bigquery-py27:
+  integration-bigquery-py38:
     docker: *test_only
     steps:
       - checkout
       - run:
           name: Run tests
-          command: tox -e integration-bigquery-py27
+          command: tox -e integration-bigquery-py38
       - store_artifacts:
           path: ./logs
 
@@ -106,24 +127,45 @@ workflows:
       - integration-postgres-py36:
           requires:
             - unit
-      - integration-postgres-py27:
-          requires:
-            - unit
-      - integration-redshift-py27:
-          requires:
-            - integration-postgres-py27
-      - integration-bigquery-py27:
-          requires:
-            - integration-postgres-py27
-      - integration-snowflake-py27:
-          requires:
-            - integration-postgres-py27
       - integration-redshift-py36:
           requires:
             - integration-postgres-py36
+          filters: &no_forks
+            branches:
+              # Forked pull requests have CIRCLE_BRANCH set to pull/XXX
+              ignore: /pull\/[0-9]+/
       - integration-bigquery-py36:
           requires:
             - integration-postgres-py36
+          filters: *no_forks
       - integration-snowflake-py36:
           requires:
             - integration-postgres-py36
+          filters: *no_forks
+      - integration-postgres-py38:
+          requires:
+            - unit
+      - integration-redshift-py38:
+          requires:
+            - integration-postgres-py38
+          filters: *no_forks
+      - integration-bigquery-py38:
+          requires:
+            - integration-postgres-py38
+          filters: *no_forks
+      - integration-snowflake-py38:
+          requires:
+            - integration-postgres-py38
+          filters: *no_forks
+      - build-wheels:
+          requires:
+            - unit
+            - integration-postgres-py36
+            - integration-redshift-py36
+            - integration-bigquery-py36
+            - integration-snowflake-py36
+            - integration-postgres-py38
+            - integration-redshift-py38
+            - integration-bigquery-py38
+            - integration-snowflake-py38
+          filters: *no_forks

@@ -1,53 +1,83 @@
 import itertools
 import os
 from collections import defaultdict
+from typing import List, Dict
 
 import dbt.utils
 import dbt.include
 import dbt.tracking
 
-from dbt.utils import get_materialization, NodeType, is_type
+from dbt.node_types import NodeType
 from dbt.linker import Linker
 
-import dbt.compat
-import dbt.context.runtime
+from dbt.context.providers import generate_runtime_model
 import dbt.contracts.project
 import dbt.exceptions
 import dbt.flags
-import dbt.loader
 import dbt.config
-from dbt.contracts.graph.compiled import CompiledNode
+from dbt.contracts.graph.compiled import InjectedCTE, COMPILED_TYPES
+from dbt.contracts.graph.parsed import ParsedNode
 
 from dbt.logger import GLOBAL_LOGGER as logger
 
 graph_file_name = 'graph.gpickle'
 
 
+def _compiled_type_for(model: ParsedNode):
+    if model.resource_type not in COMPILED_TYPES:
+        raise dbt.exceptions.InternalException(
+            'Asked to compile {} node, but it has no compiled form'
+            .format(model.resource_type)
+        )
+    return COMPILED_TYPES[model.resource_type]
+
+
 def print_compile_stats(stats):
     names = {
-        NodeType.Model: 'models',
-        NodeType.Test: 'tests',
-        NodeType.Snapshot: 'snapshots',
-        NodeType.Analysis: 'analyses',
-        NodeType.Macro: 'macros',
-        NodeType.Operation: 'operations',
-        NodeType.Seed: 'seed files',
-        NodeType.Source: 'sources',
+        NodeType.Model: 'model',
+        NodeType.Test: 'test',
+        NodeType.Snapshot: 'snapshot',
+        NodeType.Analysis: 'analysis',
+        NodeType.Macro: 'macro',
+        NodeType.Operation: 'operation',
+        NodeType.Seed: 'seed file',
+        NodeType.Source: 'source',
     }
 
     results = {k: 0 for k in names.keys()}
     results.update(stats)
 
-    stat_line = ", ".join(
-        ["{} {}".format(ct, names.get(t)) for t, ct in results.items()])
+    stat_line = ", ".join([
+        dbt.utils.pluralize(ct, names.get(t)) for t, ct in results.items()
+        if t in names
+    ])
 
-    logger.notice("Found {}".format(stat_line))
+    logger.info("Found {}".format(stat_line))
+
+
+def _node_enabled(node):
+    # Disabled models are already excluded from the manifest
+    if node.resource_type == NodeType.Test and not node.config.enabled:
+        return False
+    else:
+        return True
+
+
+def _generate_stats(manifest):
+    stats: Dict[NodeType, int] = defaultdict(int)
+    for node_name, node in itertools.chain(
+            manifest.nodes.items(),
+            manifest.macros.items()):
+        if _node_enabled(node):
+            stats[node.resource_type] += 1
+
+    return stats
 
 
 def _add_prepended_cte(prepended_ctes, new_cte):
-    for dct in prepended_ctes:
-        if dct['id'] == new_cte['id']:
-            dct['sql'] = new_cte['sql']
+    for cte in prepended_ctes:
+        if cte.id == new_cte.id:
+            cte.sql = new_cte.sql
             return
     prepended_ctes.append(new_cte)
 
@@ -68,29 +98,31 @@ def recursively_prepend_ctes(model, manifest):
         return (model, model.extra_ctes, manifest)
 
     if dbt.flags.STRICT_MODE:
-        # ensure that the cte we're adding to is compiled
-        CompiledNode(**model.serialize())
+        if not isinstance(model, tuple(COMPILED_TYPES.values())):
+            raise dbt.exceptions.InternalException(
+                'Bad model type: {}'.format(type(model))
+            )
 
-    prepended_ctes = []
+    prepended_ctes: List[InjectedCTE] = []
 
     for cte in model.extra_ctes:
-        cte_id = cte['id']
+        cte_id = cte.id
         cte_to_add = manifest.nodes.get(cte_id)
         cte_to_add, new_prepended_ctes, manifest = recursively_prepend_ctes(
             cte_to_add, manifest)
         _extend_prepended_ctes(prepended_ctes, new_prepended_ctes)
-        new_cte_name = '__dbt__CTE__{}'.format(cte_to_add.get('name'))
+        new_cte_name = '__dbt__CTE__{}'.format(cte_to_add.name)
         sql = ' {} as (\n{}\n)'.format(new_cte_name, cte_to_add.compiled_sql)
-        _add_prepended_cte(prepended_ctes, {'id': cte_id, 'sql': sql})
+        _add_prepended_cte(prepended_ctes, InjectedCTE(id=cte_id, sql=sql))
 
     model.prepend_ctes(prepended_ctes)
 
-    manifest.nodes[model.unique_id] = model
+    manifest.update_node(model)
 
     return (model, prepended_ctes, manifest)
 
 
-class Compiler(object):
+class Compiler:
     def __init__(self, config):
         self.config = config
 
@@ -102,7 +134,7 @@ class Compiler(object):
         if extra_context is None:
             extra_context = {}
 
-        logger.debug("Compiling {}".format(node.get('unique_id')))
+        logger.debug("Compiling {}".format(node.unique_id))
 
         data = node.to_dict()
         data.update({
@@ -112,14 +144,15 @@ class Compiler(object):
             'extra_ctes': [],
             'injected_sql': None,
         })
-        compiled_node = CompiledNode(**data)
+        compiled_node = _compiled_type_for(node).from_dict(data)
 
-        context = dbt.context.runtime.generate(
-            compiled_node, self.config, manifest)
+        context = generate_runtime_model(
+            compiled_node, self.config, manifest
+        )
         context.update(extra_context)
 
         compiled_node.compiled_sql = dbt.clients.jinja.get_rendered(
-            node.get('raw_sql'),
+            node.raw_sql,
             context,
             node)
 
@@ -132,22 +165,23 @@ class Compiler(object):
             # data tests get wrapped in count(*)
             # TODO : move this somewhere more reasonable
             if 'data' in injected_node.tags and \
-               is_type(injected_node, NodeType.Test):
+               injected_node.resource_type == NodeType.Test:
                 injected_node.wrapped_sql = (
-                    "select count(*) from (\n{test_sql}\n) sbq").format(
+                    "select count(*) as errors "
+                    "from (\n{test_sql}\n) sbq").format(
                         test_sql=injected_node.injected_sql)
             else:
                 # don't wrap schema tests or analyses.
                 injected_node.wrapped_sql = injected_node.injected_sql
 
-        elif is_type(injected_node, NodeType.Snapshot):
+        elif injected_node.resource_type == NodeType.Snapshot:
             # unfortunately we do everything automagically for
             # snapshots. in the future it'd be nice to generate
             # the SQL at the parser level.
             pass
 
-        elif(is_type(injected_node, NodeType.Model) and
-             get_materialization(injected_node) == 'ephemeral'):
+        elif(injected_node.resource_type == NodeType.Model and
+             injected_node.get_materialization() == 'ephemeral'):
             pass
 
         else:
@@ -158,7 +192,8 @@ class Compiler(object):
     def write_graph_file(self, linker, manifest):
         filename = graph_file_name
         graph_path = os.path.join(self.config.target_path, filename)
-        linker.write_graph(graph_path, manifest)
+        if dbt.flags.WRITE_JSON:
+            linker.write_graph(graph_path, manifest)
 
     def link_node(self, linker, node, manifest):
         linker.add_node(node.unique_id)
@@ -185,12 +220,7 @@ class Compiler(object):
 
         self.link_graph(linker, manifest)
 
-        stats = defaultdict(int)
-
-        for node_name, node in itertools.chain(
-                manifest.nodes.items(),
-                manifest.macros.items()):
-            stats[node.resource_type] += 1
+        stats = _generate_stats(manifest)
 
         if write:
             self.write_graph_file(linker, manifest)
@@ -199,7 +229,7 @@ class Compiler(object):
         return linker
 
 
-def compile_manifest(config, manifest, write=True):
+def compile_manifest(config, manifest, write=True) -> Linker:
     compiler = Compiler(config)
     compiler.initialize()
     return compiler.compile(manifest, write=write)
@@ -209,7 +239,7 @@ def _is_writable(node):
     if not node.injected_sql:
         return False
 
-    if dbt.utils.is_type(node, NodeType.Snapshot):
+    if node.resource_type == NodeType.Snapshot:
         return False
 
     return True
@@ -218,34 +248,15 @@ def _is_writable(node):
 def compile_node(adapter, config, node, manifest, extra_context, write=True):
     compiler = Compiler(config)
     node = compiler.compile_node(node, manifest, extra_context)
-    node = _inject_runtime_config(adapter, node, extra_context)
 
     if write and _is_writable(node):
         logger.debug('Writing injected SQL for node "{}"'.format(
             node.unique_id))
 
-        written_path = dbt.writer.write_node(
-            node,
+        node.build_path = node.write_node(
             config.target_path,
             'compiled',
-            node.injected_sql)
-
-        node.build_path = written_path
+            node.injected_sql
+        )
 
     return node
-
-
-def _inject_runtime_config(adapter, node, extra_context):
-    wrapped_sql = node.wrapped_sql
-    context = _node_context(adapter, node)
-    context.update(extra_context)
-    sql = dbt.clients.jinja.get_rendered(wrapped_sql, context)
-    node.wrapped_sql = sql
-    return node
-
-
-def _node_context(adapter, node):
-    return {
-        "run_started_at": dbt.tracking.active_user.run_started_at,
-        "invocation_id": dbt.tracking.active_user.invocation_id,
-    }

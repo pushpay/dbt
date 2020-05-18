@@ -3,13 +3,14 @@ import os
 import webbrowser
 
 from dbt.include.global_project import DOCS_INDEX_FILE_PATH
-from dbt.compat import SimpleHTTPRequestHandler, TCPServer
+from http.server import SimpleHTTPRequestHandler
+from socketserver import TCPServer
 from dbt.logger import GLOBAL_LOGGER as logger
 
-from dbt.task.base import ProjectOnlyTask
+from dbt.task.base import ConfiguredTask
 
 
-class ServeTask(ProjectOnlyTask):
+class ServeTask(ConfiguredTask):
     def run(self):
         os.chdir(self.config.target_path)
 
@@ -19,15 +20,16 @@ class ServeTask(ProjectOnlyTask):
 
         logger.info("Serving docs at 0.0.0.0:{}".format(port))
         logger.info(
-            "To access from your browser, navigate to http://localhost:{}."
+            "To access from your browser, navigate to:  http://localhost:{}"
             .format(port)
         )
         logger.info("Press Ctrl+C to exit.\n\n")
 
-        httpd = TCPServer(
+        # mypy doesn't think SimpleHTTPRequestHandler is ok here, but it is
+        httpd = TCPServer(  # type: ignore
             ('0.0.0.0', port),
-            SimpleHTTPRequestHandler
-        )
+            SimpleHTTPRequestHandler  # type: ignore
+        )  # type: ignore
 
         try:
             webbrowser.open_new_tab('http://127.0.0.1:{}'.format(port))

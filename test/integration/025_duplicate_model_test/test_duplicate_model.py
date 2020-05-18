@@ -33,7 +33,7 @@ class TestDuplicateModelEnabled(DBTIntegrationTest):
         }
 
     @use_profile("postgres")
-    def test_duplicate_model_enabled(self):
+    def test_postgres_duplicate_model_enabled(self):
         message = "dbt found two resources with the name"
         try:
             self.run_dbt(["run"])
@@ -73,7 +73,7 @@ class TestDuplicateModelDisabled(DBTIntegrationTest):
         }
 
     @use_profile("postgres")
-    def test_duplicate_model_disabled(self):
+    def test_postgres_duplicate_model_disabled(self):
         try:
             results = self.run_dbt(["run"])
         except CompilationException:
@@ -83,7 +83,17 @@ class TestDuplicateModelDisabled(DBTIntegrationTest):
         query = "select value from {schema}.model" \
                 .format(schema=self.unique_schema())
         result = self.run_sql(query, fetch="one")[0]
-        assert result == 1
+        self.assertEqual(result, 1)
+
+    @use_profile('postgres')
+    def test_postgres_duplicate_model_disabled_partial_parsing(self):
+        self.run_dbt(['clean'])
+        results = self.run_dbt(["--partial-parse", "run"])
+        self.assertEqual(len(results), 1)
+        results = self.run_dbt(["--partial-parse", "run"])
+        self.assertEqual(len(results), 1)
+        results = self.run_dbt(["--partial-parse", "run"])
+        self.assertEqual(len(results), 1)
 
 
 class TestDuplicateModelEnabledAcrossPackages(DBTIntegrationTest):
@@ -109,7 +119,7 @@ class TestDuplicateModelEnabledAcrossPackages(DBTIntegrationTest):
         }
 
     @use_profile("postgres")
-    def test_duplicate_model_enabled_across_packages(self):
+    def test_postgres_duplicate_model_enabled_across_packages(self):
         self.run_dbt(["deps"])
         message = "dbt found two resources with the name"
         try:
@@ -146,7 +156,7 @@ class TestDuplicateModelDisabledAcrossPackages(DBTIntegrationTest):
         }
 
     @use_profile("postgres")
-    def test_duplicate_model_disabled_across_packages(self):
+    def test_postgres_duplicate_model_disabled_across_packages(self):
         self.run_dbt(["deps"])
         try:
             self.run_dbt(["run"])
@@ -157,3 +167,25 @@ class TestDuplicateModelDisabledAcrossPackages(DBTIntegrationTest):
                 .format(schema=self.unique_schema())
         result = self.run_sql(query, fetch="one")[0]
         assert result == 1
+
+
+class TestModelTestOverlap(DBTIntegrationTest):
+
+    @property
+    def schema(self):
+        return "duplicate_model_025"
+
+    @property
+    def models(self):
+        return "models-3"
+
+    @property
+    def project_config(self):
+        return {'test-paths': [self.models]}
+
+    @use_profile('postgres')
+    def test_postgres_duplicate_test_model_paths(self):
+        # this should be ok: test/model overlap is fine
+        self.run_dbt(['compile'])
+        self.run_dbt(['--partial-parse', 'compile'])
+        self.run_dbt(['--partial-parse', 'compile'])

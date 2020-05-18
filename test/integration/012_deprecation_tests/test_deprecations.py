@@ -6,7 +6,7 @@ import dbt.exceptions
 
 class BaseTestDeprecations(DBTIntegrationTest):
     def setUp(self):
-        super(BaseTestDeprecations, self).setUp()
+        super().setUp()
         deprecations.reset_deprecations()
 
     @property
@@ -35,25 +35,64 @@ class TestDeprecations(BaseTestDeprecations):
         self.assertEqual(expected, deprecations.active_deprecations)
 
 
-class TestMacroDeprecations(BaseTestDeprecations):
+class TestMaterializationReturnDeprecation(BaseTestDeprecations):
     @property
     def models(self):
-        return self.dir('boring-models')
+        return self.dir('custom-models')
 
     @property
     def project_config(self):
         return {
-            'macro-paths': [self.dir('deprecated-macros')],
+            'macro-paths': [self.dir('custom-materialization-macros')],
         }
 
     @use_profile('postgres')
     def test_postgres_deprecations_fail(self):
-        with self.assertRaises(dbt.exceptions.CompilationException):
-            self.run_dbt(strict=True)
+        # this should fail at runtime
+        self.run_dbt(strict=True, expect_pass=False)
 
     @use_profile('postgres')
     def test_postgres_deprecations(self):
         self.assertEqual(deprecations.active_deprecations, set())
         self.run_dbt(strict=False)
-        expected = {'generate-schema-name-single-arg'}
+        expected = {'materialization-return'}
+        self.assertEqual(expected, deprecations.active_deprecations)
+
+
+class TestModelsKeyMismatchDeprecation(BaseTestDeprecations):
+    @property
+    def models(self):
+        return self.dir('models-key-mismatch')
+
+    @use_profile('postgres')
+    def test_postgres_deprecations_fail(self):
+        # this should fail at compile_time
+        with self.assertRaises(dbt.exceptions.CompilationException) as exc:
+            self.run_dbt(strict=True)
+        exc_str = ' '.join(str(exc.exception).split())  # flatten all whitespace
+        self.assertIn('"seed" is a seed node, but it is specified in the models section', exc_str)
+
+    @use_profile('postgres')
+    def test_postgres_deprecations(self):
+        self.assertEqual(deprecations.active_deprecations, set())
+        self.run_dbt(strict=False)
+        expected = {'models-key-mismatch'}
+
+
+class TestBQPartitionByDeprecation(BaseTestDeprecations):
+    @property
+    def models(self):
+        return self.dir('bq-partitioned-models')
+    
+    @use_profile('bigquery')
+    def test_bigquery_partition_by_fail(self):
+        self.run_dbt(['seed'])
+        self.run_dbt(strict=True, expect_pass=False)
+
+    @use_profile('bigquery')
+    def test_bigquery_partition_by(self):
+        self.run_dbt(['seed'])
+        self.assertEqual(deprecations.active_deprecations, set())
+        self.run_dbt(strict=False)
+        expected = {'bq-partition-by-string'}
         self.assertEqual(expected, deprecations.active_deprecations)

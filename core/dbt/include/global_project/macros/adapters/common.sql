@@ -69,6 +69,10 @@
 {%- endmacro %}
 
 {% macro default__create_table_as(temporary, relation, sql) -%}
+  {%- set sql_header = config.get('sql_header', none) -%}
+
+  {{ sql_header if sql_header is not none }}
+
   create {% if temporary: -%}temporary{%- endif %} table
     {{ relation.include(database=(not temporary), schema=(not temporary)) }}
   as (
@@ -81,17 +85,20 @@
 {%- endmacro %}
 
 {% macro default__create_view_as(relation, sql) -%}
+  {%- set sql_header = config.get('sql_header', none) -%}
+
+  {{ sql_header if sql_header is not none }}
   create view {{ relation }} as (
     {{ sql }}
   );
 {% endmacro %}
 
 
-{% macro get_catalog(information_schemas) -%}
-  {{ return(adapter_macro('get_catalog', information_schemas)) }}
+{% macro get_catalog(information_schema, schemas) -%}
+  {{ return(adapter_macro('get_catalog', information_schema, schemas)) }}
 {%- endmacro %}
 
-{% macro default__get_catalog(information_schemas) -%}
+{% macro default__get_catalog(information_schema, schemas) -%}
 
   {% set typename = adapter.type() %}
   {% set msg -%}
@@ -115,7 +122,7 @@
 {% endmacro %}
 
 {% macro default__get_columns_in_relation(relation) -%}
-  {{ dbt.exceptions.raise_not_implemented(
+  {{ exceptions.raise_not_implemented(
     'get_columns_in_relation macro not implemented for adapter '+adapter.type()) }}
 {% endmacro %}
 
@@ -133,10 +140,10 @@
   {%- set tmp_column = column_name + "__dbt_alter" -%}
 
   {% call statement('alter_column_type') %}
-    alter table {{ relation }} add column {{ tmp_column }} {{ new_column_type }};
-    update {{ relation }} set {{ tmp_column }} = {{ column_name }};
-    alter table {{ relation }} drop column {{ column_name }} cascade;
-    alter table {{ relation }} rename column {{ tmp_column }} to {{ column_name }}
+    alter table {{ relation }} add column {{ adapter.quote(tmp_column) }} {{ new_column_type }};
+    update {{ relation }} set {{ adapter.quote(tmp_column) }} = {{ adapter.quote(column_name) }};
+    alter table {{ relation }} drop column {{ adapter.quote(column_name) }} cascade;
+    alter table {{ relation }} rename column {{ adapter.quote(tmp_column) }} to {{ adapter.quote(column_name) }}
   {% endcall %}
 
 {% endmacro %}
@@ -182,9 +189,9 @@
 
 {% macro default__information_schema_name(database) -%}
   {%- if database -%}
-    {{ adapter.quote_as_configured(database, 'database') }}.information_schema
+    {{ database }}.INFORMATION_SCHEMA
   {%- else -%}
-    information_schema
+    INFORMATION_SCHEMA
   {%- endif -%}
 {%- endmacro %}
 
@@ -194,12 +201,12 @@
 {% endmacro %}
 
 {% macro default__list_schemas(database) -%}
-  {% call statement('list_schemas', fetch_result=True, auto_begin=False) %}
+  {% set sql %}
     select distinct schema_name
-    from {{ information_schema_name(database) }}.schemata
+    from {{ information_schema_name(database) }}.SCHEMATA
     where catalog_name ilike '{{ database }}'
-  {% endcall %}
-  {{ return(load_result('list_schemas').table) }}
+  {% endset %}
+  {{ return(run_query(sql)) }}
 {% endmacro %}
 
 
@@ -208,13 +215,13 @@
 {% endmacro %}
 
 {% macro default__check_schema_exists(information_schema, schema) -%}
-  {% call statement('check_schema_exists', fetch_result=True, auto_begin=False) -%}
+  {% set sql -%}
         select count(*)
-        from {{ information_schema }}.schemata
+        from {{ information_schema.replace(information_schema_view='SCHEMATA') }}
         where catalog_name='{{ information_schema.database }}'
           and schema_name='{{ schema }}'
-  {%- endcall %}
-  {{ return(load_result('check_schema_exists').table) }}
+  {%- endset %}
+  {{ return(run_query(sql)) }}
 {% endmacro %}
 
 
@@ -224,7 +231,7 @@
 
 
 {% macro default__list_relations_without_caching(information_schema, schema) %}
-  {{ dbt.exceptions.raise_not_implemented(
+  {{ exceptions.raise_not_implemented(
     'list_relations_without_caching macro not implemented for adapter '+adapter.type()) }}
 {% endmacro %}
 
@@ -235,24 +242,27 @@
 
 
 {% macro default__current_timestamp() -%}
-  {{ dbt.exceptions.raise_not_implemented(
+  {{ exceptions.raise_not_implemented(
     'current_timestamp macro not implemented for adapter '+adapter.type()) }}
 {%- endmacro %}
 
 
-{% macro collect_freshness(source, loaded_at_field) %}
-  {{ return(adapter_macro('collect_freshness', source, loaded_at_field))}}
+{% macro collect_freshness(source, loaded_at_field, filter) %}
+  {{ return(adapter_macro('collect_freshness', source, loaded_at_field, filter))}}
 {% endmacro %}
 
 
-{% macro default__collect_freshness(source, loaded_at_field) %}
-  {% call statement('check_schema_exists', fetch_result=True, auto_begin=False) -%}
+{% macro default__collect_freshness(source, loaded_at_field, filter) %}
+  {% call statement('collect_freshness', fetch_result=True, auto_begin=False) -%}
     select
       max({{ loaded_at_field }}) as max_loaded_at,
       {{ current_timestamp() }} as snapshotted_at
     from {{ source }}
+    {% if filter %}
+    where {{ filter }}
+    {% endif %}
   {% endcall %}
-  {{ return(load_result('check_schema_exists').table) }}
+  {{ return(load_result('collect_freshness').table) }}
 {% endmacro %}
 
 {% macro make_temp_relation(base_relation, suffix='__dbt_tmp') %}
@@ -262,8 +272,11 @@
 {% macro default__make_temp_relation(base_relation, suffix) %}
     {% set tmp_identifier = base_relation.identifier ~ suffix %}
     {% set tmp_relation = base_relation.incorporate(
-                                path={"identifier": tmp_identifier},
-                                table_name=tmp_identifier) -%}
+                                path={"identifier": tmp_identifier}) -%}
 
     {% do return(tmp_relation) %}
 {% endmacro %}
+
+{% macro set_sql_header(config) -%}
+  {{ config.set('sql_header', caller()) }}
+{%- endmacro %}

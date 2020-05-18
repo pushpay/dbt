@@ -1,4 +1,10 @@
+import io
+import json
+import os
+from pytest import mark
+
 from test.integration.base import DBTIntegrationTest, use_profile
+from dbt.logger import log_manager
 
 
 class BaseTestSimpleCopy(DBTIntegrationTest):
@@ -14,13 +20,30 @@ class BaseTestSimpleCopy(DBTIntegrationTest):
     def models(self):
         return self.dir("models")
 
+    @property
+    def project_config(self):
+        return self.seed_quote_cfg_with({
+            'profile': '{{ "tes" ~ "t" }}'
+        })
+
+    def seed_quote_cfg_with(self, extra):
+        cfg = {
+            'seeds': {
+                'quote_columns': False,
+            }
+        }
+        cfg.update(extra)
+        return cfg
+
 
 class TestSimpleCopy(BaseTestSimpleCopy):
 
+    @property
+    def project_config(self):
+        return self.seed_quote_cfg_with({"data-paths": [self.dir("seed-initial")]})
+
     @use_profile("postgres")
     def test__postgres__simple_copy(self):
-        self.use_default_project({"data-paths": [self.dir("seed-initial")]})
-
         results = self.run_dbt(["seed"])
         self.assertEqual(len(results),  1)
         results = self.run_dbt()
@@ -36,10 +59,29 @@ class TestSimpleCopy(BaseTestSimpleCopy):
 
         self.assertManyTablesEqual(["seed", "view_model", "incremental", "materialized", "get_and_ref"])
 
+    @use_profile('postgres')
+    def test__postgres__simple_copy_with_materialized_views(self):
+        self.run_sql('''
+            create table {schema}.unrelated_table (id int)
+        '''.format(schema=self.unique_schema())
+        )
+        self.run_sql('''
+            create materialized view {schema}.unrelated_materialized_view as (
+                select * from {schema}.unrelated_table
+            )
+        '''.format(schema=self.unique_schema()))
+        self.run_sql('''
+            create view {schema}.unrelated_view as (
+                select * from {schema}.unrelated_materialized_view
+            )
+        '''.format(schema=self.unique_schema()))
+        results = self.run_dbt(["seed"])
+        self.assertEqual(len(results),  1)
+        results = self.run_dbt()
+        self.assertEqual(len(results),  7)
+
     @use_profile("postgres")
     def test__postgres__dbt_doesnt_run_empty_models(self):
-        self.use_default_project({"data-paths": [self.dir("seed-initial")]})
-
         results = self.run_dbt(["seed"])
         self.assertEqual(len(results),  1)
         results = self.run_dbt()
@@ -66,8 +108,12 @@ class TestSimpleCopy(BaseTestSimpleCopy):
 
     @use_profile("snowflake")
     def test__snowflake__simple_copy(self):
-        self.use_default_project({"data-paths": [self.dir("seed-initial")]})
-
+        self.use_default_project({
+            "data-paths": [self.dir("seed-initial")],
+            "seeds": {
+                'quote_columns': False,
+            }
+        })
         results = self.run_dbt(["seed"])
         self.assertEqual(len(results),  1)
         results = self.run_dbt()
@@ -92,8 +138,8 @@ class TestSimpleCopy(BaseTestSimpleCopy):
     @use_profile("snowflake")
     def test__snowflake__simple_copy__quoting_off(self):
         self.use_default_project({
-            "data-paths": [self.dir("seed-initial")],
             "quoting": {"identifier": False},
+            "data-paths": [self.dir("snowflake-seed-initial")],
         })
 
         results = self.run_dbt(["seed"])
@@ -104,7 +150,7 @@ class TestSimpleCopy(BaseTestSimpleCopy):
         self.assertManyTablesEqual(["SEED", "VIEW_MODEL", "INCREMENTAL", "MATERIALIZED", "GET_AND_REF"])
 
         self.use_default_project({
-            "data-paths": [self.dir("seed-update")],
+            "data-paths": [self.dir("snowflake-seed-update")],
             "quoting": {"identifier": False},
         })
         results = self.run_dbt(["seed"])
@@ -116,7 +162,7 @@ class TestSimpleCopy(BaseTestSimpleCopy):
 
         self.use_default_project({
             "test-paths": [self.dir("tests")],
-            "data-paths": [self.dir("seed-update")],
+            "data-paths": [self.dir("snowflake-seed-update")],
             "quoting": {"identifier": False},
         })
         self.run_dbt(['test'])
@@ -124,29 +170,27 @@ class TestSimpleCopy(BaseTestSimpleCopy):
     @use_profile("snowflake")
     def test__snowflake__seed__quoting_switch(self):
         self.use_default_project({
-            "data-paths": [self.dir("seed-initial")],
             "quoting": {"identifier": False},
+            "data-paths": [self.dir("snowflake-seed-initial")],
         })
 
         results = self.run_dbt(["seed"])
         self.assertEqual(len(results),  1)
 
         self.use_default_project({
-            "data-paths": [self.dir("seed-update")],
+            "data-paths": [self.dir("snowflake-seed-update")],
             "quoting": {"identifier": True},
         })
         results = self.run_dbt(["seed"], expect_pass=False)
 
         self.use_default_project({
             "test-paths": [self.dir("tests")],
-            "data-paths": [self.dir("seed-initial")],
+            "data-paths": [self.dir("snowflake-seed-initial")],
         })
         self.run_dbt(['test'])
 
     @use_profile("bigquery")
     def test__bigquery__simple_copy(self):
-        self.use_default_project({"data-paths": [self.dir("seed-initial")]})
-
         results = self.run_dbt(["seed"])
         self.assertEqual(len(results),  1)
         results = self.run_dbt()
@@ -173,16 +217,16 @@ class TestSimpleCopy(BaseTestSimpleCopy):
 class TestSimpleCopyQuotingIdentifierOn(BaseTestSimpleCopy):
     @property
     def project_config(self):
-        return {
+        return self.seed_quote_cfg_with({
             'quoting': {
                 'identifier': True,
             },
-        }
+        })
 
     @use_profile("snowflake")
     def test__snowflake__simple_copy__quoting_on(self):
         self.use_default_project({
-            "data-paths": [self.dir("seed-initial")],
+            "data-paths": [self.dir("snowflake-seed-initial")],
         })
 
         results = self.run_dbt(["seed"])
@@ -193,7 +237,7 @@ class TestSimpleCopyQuotingIdentifierOn(BaseTestSimpleCopy):
         self.assertManyTablesEqual(["seed", "view_model", "incremental", "materialized", "get_and_ref"])
 
         self.use_default_project({
-            "data-paths": [self.dir("seed-update")],
+            "data-paths": [self.dir("snowflake-seed-update")],
         })
         results = self.run_dbt(["seed"])
         self.assertEqual(len(results),  1)
@@ -208,14 +252,13 @@ class TestSimpleCopyQuotingIdentifierOn(BaseTestSimpleCopy):
 class BaseLowercasedSchemaTest(BaseTestSimpleCopy):
     def unique_schema(self):
         # bypass the forced uppercasing that unique_schema() does on snowflake
-        schema = super(BaseLowercasedSchemaTest, self).unique_schema()
-        return schema.lower()
+        return super().unique_schema().lower()
 
 
 class TestSnowflakeSimpleLowercasedSchemaCopy(BaseLowercasedSchemaTest):
     @use_profile('snowflake')
     def test__snowflake__simple_copy(self):
-        self.use_default_project({"data-paths": [self.dir("seed-initial")]})
+        self.use_default_project({"data-paths": [self.dir("snowflake-seed-initial")]})
 
         results = self.run_dbt(["seed"])
         self.assertEqual(len(results),  1)
@@ -224,7 +267,7 @@ class TestSnowflakeSimpleLowercasedSchemaCopy(BaseLowercasedSchemaTest):
 
         self.assertManyTablesEqual(["SEED", "VIEW_MODEL", "INCREMENTAL", "MATERIALIZED", "GET_AND_REF"])
 
-        self.use_default_project({"data-paths": [self.dir("seed-update")]})
+        self.use_default_project({"data-paths": [self.dir("snowflake-seed-update")]})
 
         results = self.run_dbt(["seed"])
         self.assertEqual(len(results),  1)
@@ -235,7 +278,7 @@ class TestSnowflakeSimpleLowercasedSchemaCopy(BaseLowercasedSchemaTest):
 
         self.use_default_project({
             "test-paths": [self.dir("tests")],
-            "data-paths": [self.dir("seed-update")],
+            "data-paths": [self.dir("snowflake-seed-update")],
         })
         self.run_dbt(['test'])
 
@@ -243,21 +286,21 @@ class TestSnowflakeSimpleLowercasedSchemaCopy(BaseLowercasedSchemaTest):
 class TestSnowflakeSimpleLowercasedSchemaQuoted(BaseLowercasedSchemaTest):
     @property
     def project_config(self):
-        return {
+        return self.seed_quote_cfg_with({
             'quoting': {'identifier': False, 'schema': True}
-        }
+        })
 
     @use_profile("snowflake")
     def test__snowflake__seed__quoting_switch_schema(self):
         self.use_default_project({
-            "data-paths": [self.dir("seed-initial")],
+            "data-paths": [self.dir("snowflake-seed-initial")],
         })
 
         results = self.run_dbt(["seed"])
         self.assertEqual(len(results),  1)
 
         self.use_default_project({
-            "data-paths": [self.dir("seed-update")],
+            "data-paths": [self.dir("snowflake-seed-update")],
             "quoting": {"identifier": False, "schema": False},
         })
         results = self.run_dbt(["seed"], expect_pass=False)
@@ -270,6 +313,9 @@ class TestSnowflakeIncrementalOverwrite(BaseTestSimpleCopy):
 
     @use_profile("snowflake")
     def test__snowflake__incremental_overwrite(self):
+        self.use_default_project({
+            "data-paths": [self.dir("snowflake-seed-initial")],
+        })
         results = self.run_dbt(["run"])
         self.assertEqual(len(results),  1)
 
@@ -278,10 +324,126 @@ class TestSnowflakeIncrementalOverwrite(BaseTestSimpleCopy):
 
         # Setting the incremental_strategy should make this succeed
         self.use_default_project({
-            "models": {"incremental_strategy": "delete+insert"}
+            "models": {"incremental_strategy": "delete+insert"},
+            "data-paths": [self.dir("snowflake-seed-update")],
         })
 
         results = self.run_dbt(["run"])
         self.assertEqual(len(results),  1)
 
 
+class TestShouting(BaseTestSimpleCopy):
+    @property
+    def models(self):
+        return self.dir('models-shouting')
+
+    @property
+    def project_config(self):
+        return self.seed_quote_cfg_with({"data-paths": [self.dir("seed-initial")]})
+
+    @use_profile("postgres")
+    def test__postgres__simple_copy_loud(self):
+        results = self.run_dbt(["seed"])
+        self.assertEqual(len(results),  1)
+        results = self.run_dbt()
+        self.assertEqual(len(results),  7)
+
+        self.assertManyTablesEqual(["seed", "VIEW_MODEL", "INCREMENTAL", "MATERIALIZED", "GET_AND_REF"])
+
+        self.use_default_project({"data-paths": [self.dir("seed-update")]})
+        results = self.run_dbt(["seed"])
+        self.assertEqual(len(results),  1)
+        results = self.run_dbt()
+        self.assertEqual(len(results),  7)
+
+        self.assertManyTablesEqual(["seed", "VIEW_MODEL", "INCREMENTAL", "MATERIALIZED", "GET_AND_REF"])
+
+
+# I give up on getting this working for Windows.
+@mark.skipif(os.name == 'nt', reason='mixed-case postgres database tests are not supported on Windows')
+class TestMixedCaseDatabase(BaseTestSimpleCopy):
+    @property
+    def models(self):
+        return self.dir('models-trivial')
+
+    def postgres_profile(self):
+        return {
+            'config': {
+                'send_anonymous_usage_stats': False
+            },
+            'test': {
+                'outputs': {
+                    'default2': {
+                        'type': 'postgres',
+                        'threads': 4,
+                        'host': self.database_host,
+                        'port': 5432,
+                        'user': 'root',
+                        'pass': 'password',
+                        'dbname': 'dbtMixedCase',
+                        'schema': self.unique_schema()
+                    },
+                },
+                'target': 'default2'
+            }
+        }
+
+    @property
+    def project_config(self):
+        return {}
+
+    @use_profile('postgres')
+    def test_postgres_run_mixed_case(self):
+        self.run_dbt()
+        self.run_dbt()
+
+
+class TestQuotedDatabase(BaseTestSimpleCopy):
+
+    @property
+    def project_config(self):
+        return self.seed_quote_cfg_with({
+            'quoting': {
+                'database': True,
+            },
+            "data-paths": [self.dir("seed-initial")],
+        })
+
+    def setUp(self):
+        super().setUp()
+        self.initial_stdout = log_manager.stdout
+        self.initial_stderr = log_manager.stderr
+        self.stringbuf = io.StringIO()
+        log_manager.set_output_stream(self.stringbuf)
+
+    def tearDown(self):
+        log_manager.set_output_stream(self.initial_stdout, self.initial_stderr)
+        super().tearDown()
+
+    def seed_get_json(self, expect_pass=True):
+        self.run_dbt(
+            ['--debug', '--log-format=json', '--single-threaded', 'seed'],
+            expect_pass=expect_pass
+        )
+        logs = []
+        for line in self.stringbuf.getvalue().split('\n'):
+            try:
+                log = json.loads(line)
+            except ValueError:
+                continue
+
+            if log['extra'].get('run_state') != 'internal':
+                continue
+            logs.append(log)
+        self.assertGreater(len(logs), 0)
+        return logs
+
+    @use_profile('postgres')
+    def test_postgres_no_create_schemas(self):
+        logs = self.seed_get_json()
+        for log in logs:
+            msg = log['message']
+            self.assertFalse(
+                'create schema if not exists' in msg,
+                f'did not expect schema creation: {msg}'
+            )

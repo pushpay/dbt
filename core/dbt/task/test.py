@@ -1,5 +1,7 @@
+from typing import Dict, Any
+
 from dbt.node_runners import TestRunner
-from dbt.node_types import NodeType
+from dbt.node_types import NodeType, RunHookType
 from dbt.task.run import RunTask
 
 
@@ -12,11 +14,10 @@ class TestTask(RunTask):
     def raise_on_first_error(self):
         return False
 
-    def before_run(self, adapter, selected_uids):
+    def safe_run_hooks(
+        self, adapter, hook_type: RunHookType, extra_context: Dict[str, Any]
+    ) -> None:
         # Don't execute on-run-* hooks for tests
-        self.populate_adapter_cache(adapter)
-
-    def after_run(self, adapter, results):
         pass
 
     def build_query(self):

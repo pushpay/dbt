@@ -2,11 +2,11 @@ import os.path
 import os
 import shutil
 
-from dbt.task.base import ProjectOnlyTask
+from dbt.task.base import ConfiguredTask
 from dbt.logger import GLOBAL_LOGGER as logger
 
 
-class CleanTask(ProjectOnlyTask):
+class CleanTask(ConfiguredTask):
 
     def __is_project_path(self, path):
         proj_path = os.path.abspath('.')
@@ -21,7 +21,7 @@ class CleanTask(ProjectOnlyTask):
         abs_path = os.path.abspath(path)
         protected_paths = self.config.source_paths + \
             self.config.test_paths + ['.']
-        protected_abs_paths = [os.path.abspath for p in protected_paths]
+        protected_abs_paths = [os.path.abspath(p) for p in protected_paths]
         return abs_path in set(protected_abs_paths) or \
             self.__is_project_path(abs_path)
 
@@ -35,4 +35,7 @@ class CleanTask(ProjectOnlyTask):
             if not self.__is_protected_path(path):
                 shutil.rmtree(path, True)
                 logger.info(" Cleaned {}/*".format(path))
+            else:
+                logger.info("ERROR: not cleaning {}/* because it is "
+                            "protected".format(path))
         logger.info("Finished cleaning all paths.")

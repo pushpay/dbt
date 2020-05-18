@@ -1,3 +1,18 @@
+{% macro postgres__create_table_as(temporary, relation, sql) -%}
+  {%- set unlogged = config.get('unlogged', default=false) -%}
+  {%- set sql_header = config.get('sql_header', none) -%}
+
+  {{ sql_header if sql_header is not none }}
+
+  create {% if temporary -%}
+    temporary
+  {%- elif unlogged -%}
+    unlogged
+  {%- endif %} table {{ relation }}
+  as (
+    {{ sql }}
+  );
+{%- endmacro %}
 
 {% macro postgres__create_schema(database_name, schema_name) -%}
   {% if database_name -%}
@@ -42,7 +57,7 @@
 {% macro postgres__list_relations_without_caching(information_schema, schema) %}
   {% call statement('list_relations_without_caching', fetch_result=True) -%}
     select
-      '{{ information_schema.database.lower() }}' as database,
+      '{{ information_schema.database }}' as database,
       tablename as name,
       schemaname as schema,
       'table' as type
@@ -50,7 +65,7 @@
     where schemaname ilike '{{ schema }}'
     union all
     select
-      '{{ information_schema.database.lower() }}' as database,
+      '{{ information_schema.database }}' as database,
       viewname as name,
       schemaname as schema,
       'view' as type
@@ -78,7 +93,7 @@
 {% endmacro %}
 
 {% macro postgres__check_schema_exists(information_schema, schema) -%}
-  {% if database -%}
+  {% if information_schema.database -%}
     {{ adapter.verify_database(information_schema.database) }}
   {%- endif -%}
   {% call statement('check_schema_exists', fetch_result=True, auto_begin=False) %}
@@ -92,6 +107,12 @@
   now()
 {%- endmacro %}
 
+{% macro postgres__snapshot_string_as_time(timestamp) -%}
+    {%- set result = "'" ~ timestamp ~ "'::timestamp without time zone" -%}
+    {{ return(result) }}
+{%- endmacro %}
+
+
 {% macro postgres__snapshot_get_time() -%}
   {{ current_timestamp() }}::timestamp without time zone
 {%- endmacro %}
@@ -99,7 +120,6 @@
 {% macro postgres__make_temp_relation(base_relation, suffix) %}
     {% set tmp_identifier = base_relation.identifier ~ suffix ~ py_current_timestring() %}
     {% do return(base_relation.incorporate(
-                                  table_name=tmp_identifier,
                                   path={
                                     "identifier": tmp_identifier,
                                     "schema": none,

@@ -1,6 +1,6 @@
 from test.integration.base import DBTIntegrationTest, use_profile
 import os
-from dbt.logger import log_to_stdout, GLOBAL_LOGGER
+from dbt.logger import log_manager
 
 import json
 
@@ -27,10 +27,13 @@ class TestStrictUndefined(DBTIntegrationTest):
             'macro-paths': [self.dir('macros')],
             'data-paths': [self.dir('data')],
             'test-paths': [self.dir('tests')],
+            'seeds': {
+                'quote_columns': False,
+            },
         }
 
     def run_dbt_ls(self, args=None, expect_pass=True):
-        log_to_stdout(GLOBAL_LOGGER)
+        log_manager.stdout_console()
         full_args = ['ls']
         if args is not None:
             full_args = full_args + args
@@ -38,7 +41,7 @@ class TestStrictUndefined(DBTIntegrationTest):
         result = self.run_dbt(args=full_args, expect_pass=expect_pass,
                               strict=False, parser=False)
 
-        log_to_stdout(GLOBAL_LOGGER)
+        log_manager.stdout_console()
         return result
 
     def assertEqualJSON(self, json_str, expected):
@@ -59,7 +62,7 @@ class TestStrictUndefined(DBTIntegrationTest):
     def expect_snapshot_output(self):
         expectations = {
             'name': 'my_snapshot',
-            'selector': 'test.my_snapshot',
+            'selector': 'test.snapshot.my_snapshot',
             'json': {
                 'name': 'my_snapshot',
                 'package_name': 'test',
@@ -117,9 +120,28 @@ class TestStrictUndefined(DBTIntegrationTest):
 
     def expect_model_output(self):
         expectations = {
-            'name': ('inner', 'outer'),
-            'selector': ('test.sub.inner', 'test.outer'),
+            'name': ('ephemeral', 'inner', 'outer'),
+            'selector': ('test.ephemeral', 'test.sub.inner', 'test.outer'),
             'json': (
+                {
+                    'name': 'ephemeral',
+                    'package_name': 'test',
+                    'depends_on': {'nodes': [], 'macros': []},
+                    'tags': [],
+                    'config': {
+                        'enabled': True,
+                        'materialized': 'ephemeral',
+                        'post-hook': [],
+                        'tags': [],
+                        'pre-hook': [],
+                        'quoting': {},
+                        'vars': {},
+                        'column_types': {},
+                        'persist_docs': {},
+                    },
+                    'alias': 'ephemeral',
+                    'resource_type': 'model',
+                },
                 {
                     'name': 'inner',
                     'package_name': 'test',
@@ -142,6 +164,36 @@ class TestStrictUndefined(DBTIntegrationTest):
                 {
                     'name': 'outer',
                     'package_name': 'test',
+                    'depends_on': {'nodes': ['model.test.ephemeral'], 'macros': []},
+                    'tags': [],
+                    'config': {
+                        'enabled': True,
+                        'materialized': 'view',
+                        'post-hook': [],
+                        'tags': [],
+                        'pre-hook': [],
+                        'quoting': {},
+                        'vars': {},
+                        'column_types': {},
+                        'persist_docs': {},
+                    },
+                    'alias': 'outer',
+                    'resource_type': 'model',
+                },
+            ),
+            'path': (self.dir('models/ephemeral.sql'), self.dir('models/sub/inner.sql'), self.dir('models/outer.sql')),
+        }
+        self.expect_given_output(['--resource-type', 'model'], expectations)
+
+    # Do not include ephemeral model - it was not selected
+    def expect_model_ephemeral_output(self):
+        expectations = {
+            'name': ('outer'),
+            'selector': ('test.outer'),
+            'json': (
+                {
+                    'name': 'outer',
+                    'package_name': 'test',
                     'depends_on': {'nodes': [], 'macros': []},
                     'tags': [],
                     'config': {
@@ -159,9 +211,9 @@ class TestStrictUndefined(DBTIntegrationTest):
                     'resource_type': 'model',
                 },
             ),
-            'path': (self.dir('models/sub/inner.sql'), self.dir('models/outer.sql')),
+            'path': (self.dir('models/outer.sql'), ),
         }
-        self.expect_given_output(['--resource-type', 'model'], expectations)
+        self.expect_given_output(['--model', 'outer'], expectations)
 
     def expect_source_output(self):
         expectations = {
@@ -172,6 +224,7 @@ class TestStrictUndefined(DBTIntegrationTest):
                 'name': 'my_table',
                 'source_name': 'my_source',
                 'resource_type': 'source',
+                'tags': [],
             },
             'path': self.dir('models/schema.yml'),
         }
@@ -198,6 +251,7 @@ class TestStrictUndefined(DBTIntegrationTest):
                     'vars': {},
                     'column_types': {},
                     'persist_docs': {},
+                    'quote_columns': False,
                 },
                 'alias': 'seed',
                 'resource_type': 'seed',
@@ -214,7 +268,7 @@ class TestStrictUndefined(DBTIntegrationTest):
                 {
                     'name': 'not_null_outer_id',
                     'package_name': 'test',
-                    'depends_on': {'nodes': ['model.test.outer'], 'macros': []},
+                    'depends_on': {'nodes': ['model.test.outer'], 'macros': ['macro.dbt.test_not_null']},
                     'tags': ['schema'],
                     'config': {
                         'enabled': True,
@@ -255,7 +309,7 @@ class TestStrictUndefined(DBTIntegrationTest):
                 {
                     'name': 'unique_outer_id',
                     'package_name': 'test',
-                    'depends_on': {'nodes': ['model.test.outer'], 'macros': []},
+                    'depends_on': {'nodes': ['model.test.outer'], 'macros': ['macro.dbt.test_unique']},
                     'tags': ['schema'],
                     'config': {
                         'enabled': True,
@@ -282,7 +336,8 @@ class TestStrictUndefined(DBTIntegrationTest):
         # but models don't! they just have (package.name)
         # sources are like models - (package.source_name.table_name)
         expected_default = {
-            'test.my_snapshot',
+            'test.ephemeral',
+            'test.snapshot.my_snapshot',
             'test.sub.inner',
             'test.outer',
             'test.seed',
@@ -318,7 +373,7 @@ class TestStrictUndefined(DBTIntegrationTest):
         self.assertEqual(set(results), {'test.outer', 'test.sub.inner'})
 
         results = self.run_dbt_ls(['--resource-type', 'model', '--exclude', 'inner'])
-        self.assertEqual(set(results), {'test.outer'})
+        self.assertEqual(set(results), {'test.ephemeral', 'test.outer'})
 
     @use_profile('postgres')
     def test_postgres_ls(self):

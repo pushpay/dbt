@@ -31,6 +31,15 @@
 
     ),
 
+    snapshotted_data as (
+
+        select *,
+            {{ strategy.unique_key }} as dbt_unique_key
+
+        from {{ target_relation }}
+
+    ),
+
     source_data as (
 
         select *,
@@ -41,15 +50,6 @@
             nullif({{ strategy.updated_at }}, {{ strategy.updated_at }}) as dbt_valid_to
 
         from snapshot_query
-    ),
-
-    snapshotted_data as (
-
-        select *,
-            {{ strategy.unique_key }} as dbt_unique_key
-
-        from {{ target_relation }}
-
     ),
 
     insertions as (
@@ -84,6 +84,15 @@
 
     ),
 
+    snapshotted_data as (
+
+        select *,
+            {{ strategy.unique_key }} as dbt_unique_key
+
+        from {{ target_relation }}
+
+    ),
+
     source_data as (
 
         select
@@ -94,15 +103,6 @@
             {{ strategy.updated_at }} as dbt_valid_from
 
         from snapshot_query
-    ),
-
-    snapshotted_data as (
-
-        select *,
-            {{ strategy.unique_key }} as dbt_unique_key
-
-        from {{ target_relation }}
-
     ),
 
     updates as (
@@ -170,7 +170,7 @@
         insert into {{ tmp_relation }} (dbt_change_type, dbt_scd_id, dbt_valid_to)
         select dbt_change_type, dbt_scd_id, dbt_valid_to from (
             {{ updates_select }}
-        ) dbt_sbq;
+        ) dbt_sbq
     {% endcall %}
 
     {% do return(tmp_relation) %}
@@ -180,20 +180,18 @@
 {% materialization snapshot, default %}
   {%- set config = model['config'] -%}
 
-  {%- set target_database = config.get('target_database') -%}
-  {%- set target_schema = config.get('target_schema') -%}
   {%- set target_table = model.get('alias', model.get('name')) -%}
 
   {%- set strategy_name = config.get('strategy') -%}
   {%- set unique_key = config.get('unique_key') %}
 
-  {% if not adapter.check_schema_exists(target_database, target_schema) %}
-    {% do create_schema(target_database, target_schema) %}
+  {% if not adapter.check_schema_exists(model.database, model.schema) %}
+    {% do create_schema(model.database, model.schema) %}
   {% endif %}
 
   {% set target_relation_exists, target_relation = get_or_create_relation(
-          database=target_database,
-          schema=target_schema,
+          database=model.database,
+          schema=model.schema,
           identifier=target_table,
           type='table') -%}
 
@@ -201,8 +199,13 @@
     {% do exceptions.relation_wrong_type(target_relation, 'table') %}
   {%- endif -%}
 
+
+  {{ run_hooks(pre_hooks, inside_transaction=False) }}
+
+  {{ run_hooks(pre_hooks, inside_transaction=True) }}
+
   {% set strategy_macro = strategy_dispatch(strategy_name) %}
-  {% set strategy = strategy_macro(model, "snapshotted_data", "source_data", config) %}
+  {% set strategy = strategy_macro(model, "snapshotted_data", "source_data", config, target_relation_exists) %}
 
   {% if not target_relation_exists %}
 
@@ -217,6 +220,7 @@
 
       {% set staging_table = build_snapshot_staging_table(strategy, sql, target_relation) %}
 
+      -- this may no-op if the database does not require column expansion
       {% do adapter.expand_target_column_types(from_relation=staging_table,
                                                to_relation=target_relation) %}
 
@@ -252,10 +256,16 @@
 
   {% endif %}
 
+  {{ run_hooks(post_hooks, inside_transaction=True) }}
+
   {{ adapter.commit() }}
 
   {% if staging_table is defined %}
       {% do post_snapshot(staging_table) %}
   {% endif %}
+
+  {{ run_hooks(post_hooks, inside_transaction=False) }}
+
+  {{ return({'relations': [target_relation]}) }}
 
 {% endmaterialization %}

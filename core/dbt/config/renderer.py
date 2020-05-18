@@ -1,30 +1,31 @@
-from dbt import compat
+from typing import Dict, Any
+
 from dbt.clients.jinja import get_rendered
-from dbt.context.common import generate_config_context
+
 from dbt.exceptions import DbtProfileError
 from dbt.exceptions import DbtProjectError
 from dbt.exceptions import RecursionException
 from dbt.utils import deep_map
 
 
-class ConfigRenderer(object):
+class ConfigRenderer:
     """A renderer provides configuration rendering for a given set of cli
     variables and a render type.
     """
-    def __init__(self, cli_vars):
-        self.context = generate_config_context(cli_vars)
+    def __init__(self, context: Dict[str, Any]):
+        self.context = context
 
     @staticmethod
-    def _is_hook_or_model_vars_path(keypath):
+    def _is_deferred_render(keypath):
         if not keypath:
             return False
 
         first = keypath[0]
         # run hooks
-        if first in {'on-run-start', 'on-run-end'}:
+        if first in {'on-run-start', 'on-run-end', 'query-comment'}:
             return True
         # models have two things to avoid
-        if first in {'seeds', 'models'}:
+        if first in {'seeds', 'models', 'snapshots'}:
             # model-level hooks
             if 'pre-hook' in keypath or 'post-hook' in keypath:
                 return True
@@ -46,9 +47,13 @@ class ConfigRenderer(object):
         :param key str: The key to convert on.
         :return Any: The rendered entry.
         """
-        # hooks should be treated as raw sql, they'll get rendered later.
-        # Same goes for 'vars' declarations inside 'models'/'seeds'.
-        if self._is_hook_or_model_vars_path(keypath):
+        # the project name is never rendered
+        if keypath == ('name',):
+            return value
+        # query comments and hooks should be treated as raw sql, they'll get
+        # rendered later.
+        # Same goes for 'vars' declarations inside 'models'/'seeds'
+        if self._is_deferred_render(keypath):
             return value
 
         return self.render_value(value)
@@ -56,11 +61,9 @@ class ConfigRenderer(object):
     def render_value(self, value, keypath=None):
         # keypath is ignored.
         # if it wasn't read as a string, ignore it
-        if not isinstance(value, compat.basestring):
+        if not isinstance(value, str):
             return value
-        # force the result of rendering into this python version's native
-        # string type
-        return compat.to_native_string(get_rendered(value, self.context))
+        return str(get_rendered(value, self.context))
 
     def _render_profile_data(self, value, keypath):
         result = self.render_value(value)
@@ -72,10 +75,24 @@ class ConfigRenderer(object):
                 pass
         return result
 
+    @staticmethod
+    def _is_schema_test(keypath) -> bool:
+        # we got passed an UnparsedSourceDefinition
+        if len(keypath) > 2 and keypath[0] == 'tables':
+            if keypath[2] == 'tests':
+                return True
+            elif keypath[2] == 'columns':
+                if len(keypath) > 4 and keypath[4] == 'tests':
+                    return True
+        return False
+
     def _render_schema_source_data(self, value, keypath):
         # things to not render:
         # - descriptions
+        # - test arguments
         if len(keypath) > 0 and keypath[-1] == 'description':
+            return value
+        elif self._is_schema_test(keypath):
             return value
 
         return self.render_value(value)
@@ -104,6 +121,15 @@ class ConfigRenderer(object):
     def render_schema_source(self, as_parsed):
         try:
             return deep_map(self._render_schema_source_data, as_parsed)
+        except RecursionException:
+            raise DbtProfileError(
+                'Cycle detected: schema.yml input has a reference to itself',
+                project=as_parsed
+            )
+
+    def render_packages_data(self, as_parsed):
+        try:
+            return deep_map(self.render_value, as_parsed)
         except RecursionException:
             raise DbtProfileError(
                 'Cycle detected: schema.yml input has a reference to itself',

@@ -1,10 +1,12 @@
 {% macro postgres_get_relations () -%}
+
+  {#
+      -- in pg_depend, objid is the dependent, refobjid is the referenced object
+      --  > a pg_depend entry indicates that the referenced object cannot be
+      --  > dropped without also dropping the dependent object.
+  #}
+
   {%- call statement('relations', fetch_result=True) -%}
-    -- {#
-    -- in pg_depend, objid is the dependent, refobjid is the referenced object
-    -- "a pg_depend entry indicates that the referenced object cannot be dropped without also dropping the dependent object."
-    -- #}
-    -- {# this only works with the current database #}
     with relation as (
         select
             pg_rewrite.ev_class as class,
@@ -30,7 +32,7 @@
             pg_namespace.oid as id,
             pg_namespace.nspname as name
         from pg_namespace
-        where nspname != 'information_schema' and nspname not like 'pg_%'
+        where nspname != 'information_schema' and nspname not like 'pg\_%'
     ),
     referenced as (
         select

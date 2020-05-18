@@ -3,7 +3,7 @@
   {%- if dist is not none -%}
       {%- set dist = dist.strip().lower() -%}
 
-      {%- if dist in ['all', 'even'] -%}
+      {%- if dist in ['all', 'even', 'auto'] -%}
         diststyle {{ dist }}
       {%- else -%}
         diststyle key distkey ({{ dist }})
@@ -37,6 +37,9 @@
   {%- set _sort = config.get(
           'sort',
           validator=validation.any[list, basestring]) -%}
+  {%- set sql_header = config.get('sql_header', none) -%}
+
+  {{ sql_header if sql_header is not none }}
 
   create {% if temporary -%}temporary{%- endif %} table
     {{ relation.include(database=(not temporary), schema=(not temporary)) }}
@@ -51,6 +54,9 @@
 {% macro redshift__create_view_as(relation, sql) -%}
 
   {% set bind_qualifier = '' if config.get('bind', default=True) else 'with no schema binding' %}
+  {%- set sql_header = config.get('sql_header', none) -%}
+
+  {{ sql_header if sql_header is not none }}
 
   create view {{ relation }} as (
     {{ sql }}
@@ -80,7 +86,7 @@
           numeric_precision,
           numeric_scale
 
-        from {{ relation.information_schema('columns') }}
+        from information_schema."columns"
         where table_name = '{{ relation.identifier }}'
     ),
 
@@ -170,6 +176,12 @@
 
 {% macro redshift__snapshot_get_time() -%}
   {{ current_timestamp() }}::timestamp
+{%- endmacro %}
+
+
+{% macro redshift__snapshot_string_as_time(timestamp) -%}
+    {%- set result = "'" ~ timestamp ~ "'::timestamp" -%}
+    {{ return(result) }}
 {%- endmacro %}
 
 {% macro redshift__make_temp_relation(base_relation, suffix) %}

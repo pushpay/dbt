@@ -30,13 +30,14 @@ class RedshiftAdapter(PostgresAdapter):
         https://docs.aws.amazon.com/redshift/latest/dg/r_DROP_TABLE.html
         """
         with self.connections.fresh_transaction():
-            parent = super(RedshiftAdapter, self)
-            return parent.drop_relation(relation)
+            return super().drop_relation(relation)
 
     @classmethod
     def convert_text_type(cls, agate_table, col_idx):
         column = agate_table.columns[col_idx]
-        lens = (len(d.encode("utf-8")) for d in column.values_without_nulls())
+        # `lens` must be a list, so this can't be a generator expression,
+        # because max() raises ane exception if its argument has no members.
+        lens = [len(d.encode("utf-8")) for d in column.values_without_nulls()]
         max_len = max(lens) if lens else 64
         return "varchar({})".format(max_len)
 

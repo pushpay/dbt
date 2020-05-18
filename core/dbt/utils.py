@@ -1,24 +1,42 @@
 import collections
+import concurrent.futures
 import copy
 import datetime
+import decimal
 import functools
 import hashlib
 import itertools
 import json
 import os
+from enum import Enum
+from typing_extensions import Protocol
+from typing import (
+    Tuple, Type, Any, Optional, TypeVar, Dict, Union, Callable
+)
 
 import dbt.exceptions
 
-from dbt.compat import basestring, DECIMALS
 from dbt.logger import GLOBAL_LOGGER as logger
 from dbt.node_types import NodeType
 from dbt.clients import yaml_helper
 
+DECIMALS: Tuple[Type[Any], ...]
+try:
+    import cdecimal  # typing: ignore
+except ImportError:
+    DECIMALS = (decimal.Decimal,)
+else:
+    DECIMALS = (decimal.Decimal, cdecimal.Decimal)
 
-class ExitCodes(object):
+
+class ExitCodes(int, Enum):
     Success = 0
     ModelError = 1
     UnhandledError = 2
+
+
+def to_bytes(s):
+    return s.encode('latin-1')
 
 
 def coalesce(*args):
@@ -44,12 +62,14 @@ def get_model_name_or_none(model):
     if model is None:
         name = '<None>'
 
-    elif isinstance(model, basestring):
+    elif isinstance(model, str):
         name = model
     elif isinstance(model, dict):
         name = model.get('alias', model.get('name'))
-    elif hasattr(model, 'nice_name'):
-        name = model.nice_name
+    elif hasattr(model, 'alias'):
+        name = model.alias
+    elif hasattr(model, 'name'):
+        name = model.name
     else:
         name = str(model)
     return name
@@ -63,74 +83,19 @@ def compiler_warning(model, msg, resource_type='model'):
     )
 
 
-def id_matches(unique_id, target_name, target_package, nodetypes, model):
-    """Return True if the unique ID matches the given name, package, and type.
-
-    If package is None, any package is allowed.
-    nodetypes should be a container of NodeTypes that implements the 'in'
-    operator.
-    """
-    node_type = model.get('resource_type', 'node')
-    node_parts = unique_id.split('.', 2)
-    if len(node_parts) != 3:
-        msg = "unique_id {} is malformed".format(unique_id)
-        dbt.exceptions.raise_compiler_error(msg, model)
-
-    resource_type, package_name, node_name = node_parts
-    if node_type == NodeType.Source:
-        if node_name.count('.') != 1:
-            msg = "{} names must contain exactly 1 '.' character"\
-                .format(node_type)
-            dbt.exceptions.raise_compiler_error(msg, model)
-    else:
-        if '.' in node_name:
-            msg = "{} names cannot contain '.' characters".format(node_type)
-            dbt.exceptions.raise_compiler_error(msg, model)
-
-    if resource_type not in nodetypes:
-        return False
-
-    if target_name != node_name:
-        return False
-
-    return target_package is None or target_package == package_name
-
-
-def find_in_subgraph_by_name(subgraph, target_name, target_package, nodetype):
-    """Find an entry in a subgraph by name. Any mapping that implements
-    .items() and maps unique id -> something can be used as the subgraph.
-
-    Names are like:
-        '{nodetype}.{target_package}.{target_name}'
-
-    You can use `None` for the package name as a wildcard.
-    """
-    for name, model in subgraph.items():
-        if id_matches(name, target_name, target_package, nodetype, model):
-            return model
-
-    return None
-
-
-def find_in_list_by_name(haystack, target_name, target_package, nodetype):
-    """Find an entry in the given list by name."""
-    for model in haystack:
-        name = model.get('unique_id')
-        if id_matches(name, target_name, target_package, nodetype, model):
-            return model
-
-    return None
-
-
 MACRO_PREFIX = 'dbt_macro__'
 DOCS_PREFIX = 'dbt_docs__'
 
 
 def get_dbt_macro_name(name):
+    if name is None:
+        raise dbt.exceptions.InternalException('Got None for a macro name!')
     return '{}{}'.format(MACRO_PREFIX, name)
 
 
 def get_dbt_docs_name(name):
+    if name is None:
+        raise dbt.exceptions.InternalException('Got None for a doc name!')
     return '{}{}'.format(DOCS_PREFIX, name)
 
 
@@ -215,8 +180,14 @@ def deep_merge_item(destination, key, value):
         destination[key] = value
 
 
-def _deep_map(func, value, keypath):
-    atomic_types = (int, float, basestring, type(None), bool)
+def _deep_map(
+    func: Callable[[Any, Tuple[Union[str, int], ...]], Any],
+    value: Any,
+    keypath: Tuple[Union[str, int], ...],
+) -> Any:
+    atomic_types: Tuple[Type[Any], ...] = (int, float, str, type(None), bool)
+
+    ret: Any
 
     if isinstance(value, list):
         ret = [
@@ -225,13 +196,14 @@ def _deep_map(func, value, keypath):
         ]
     elif isinstance(value, dict):
         ret = {
-            k: _deep_map(func, v, (keypath + (k,)))
+            k: _deep_map(func, v, (keypath + (str(k),)))
             for k, v in value.items()
         }
     elif isinstance(value, atomic_types):
         ret = func(value, keypath)
     else:
-        ok_types = (list, dict) + atomic_types
+        container_types: Tuple[Type[Any], ...] = (list, dict)
+        ok_types = container_types + atomic_types
         raise dbt.exceptions.DbtConfigError(
             'in _deep_map, expected one of {!r}, got {!r}'
             .format(ok_types, type(value))
@@ -268,40 +240,16 @@ def deep_map(func, value):
 
 class AttrDict(dict):
     def __init__(self, *args, **kwargs):
-        super(AttrDict, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
         self.__dict__ = self
 
 
-def to_unicode(s, encoding):
-    try:
-        unicode
-        return unicode(s, encoding)
-    except NameError:
-        return s
-
-
-def to_string(s):
-    try:
-        unicode
-        return s.encode('utf-8')
-    except NameError:
-        return s
-
-
-def get_materialization(node):
-    return node.get('config', {}).get('materialized')
-
-
 def get_ephemeral_type(node):
-    return node.get('config', {}).get('ephemeral_type')
+    return node.config.ephemeral_type
 
 
 def is_enabled(node):
-    return node.get('config', {}).get('enabled') is True
-
-
-def is_type(node, _type):
-    return node.get('resource_type') == _type
+    return node.config.enabled
 
 
 def get_pseudo_test_path(node_name, source_path, test_type):
@@ -318,32 +266,23 @@ def get_pseudo_hook_path(hook_name):
     return os.path.join(*path_parts)
 
 
-def get_nodes_by_tags(nodes, match_tags, resource_type):
-    matched_nodes = []
-    for node in nodes:
-        node_tags = node.get('tags', [])
-        if len(set(node_tags) & match_tags):
-            matched_nodes.append(node)
-    return matched_nodes
-
-
 def md5(string):
     return hashlib.md5(string.encode('utf-8')).hexdigest()
 
 
 def get_hash(model):
-    return hashlib.md5(model.get('unique_id').encode('utf-8')).hexdigest()
+    return hashlib.md5(model.unique_id.encode('utf-8')).hexdigest()
 
 
 def get_hashed_contents(model):
-    return hashlib.md5(model.get('raw_sql').encode('utf-8')).hexdigest()
+    return hashlib.md5(model.raw_sql.encode('utf-8')).hexdigest()
 
 
 def flatten_nodes(dep_list):
     return list(itertools.chain.from_iterable(dep_list))
 
 
-class memoized(object):
+class memoized:
     '''Decorator. Caches a function's return value each time it is called. If
     called later with the same arguments, the cached value is returned (not
     reevaluated).
@@ -388,7 +327,7 @@ def invalid_ref_test_message(node, target_model_name, target_model_package,
 
 def invalid_ref_fail_unless_test(node, target_model_name,
                                  target_model_package, disabled):
-    if node.get('resource_type') == NodeType.Test:
+    if node.resource_type == NodeType.Test:
         msg = invalid_ref_test_message(node, target_model_name,
                                        target_model_package, disabled)
         if disabled:
@@ -404,7 +343,7 @@ def invalid_ref_fail_unless_test(node, target_model_name,
 
 
 def invalid_source_fail_unless_test(node, target_name, target_table_name):
-    if node.get('resource_type') == NodeType.Test:
+    if node.resource_type == NodeType.Test:
         msg = dbt.exceptions.source_disabled_message(node, target_name,
                                                      target_table_name)
         dbt.exceptions.warn_or_error(msg, log_fmt='WARNING: {}')
@@ -413,11 +352,11 @@ def invalid_source_fail_unless_test(node, target_name, target_table_name):
                                                target_table_name)
 
 
-def parse_cli_vars(var_string):
+def parse_cli_vars(var_string: str) -> Dict[str, Any]:
     try:
         cli_vars = yaml_helper.load_yaml_text(var_string)
         var_type = type(cli_vars)
-        if var_type == dict:
+        if var_type is dict:
             return cli_vars
         else:
             type_name = var_type.__name__
@@ -431,16 +370,19 @@ def parse_cli_vars(var_string):
         raise
 
 
-def filter_null_values(input):
-    return dict((k, v) for (k, v) in input.items()
-                if v is not None)
+K_T = TypeVar('K_T')
+V_T = TypeVar('V_T')
 
 
-def add_ephemeral_model_prefix(s):
+def filter_null_values(input: Dict[K_T, Optional[V_T]]) -> Dict[K_T, V_T]:
+    return {k: v for k, v in input.items() if v is not None}
+
+
+def add_ephemeral_model_prefix(s: str) -> str:
     return '__dbt__CTE__{}'.format(s)
 
 
-def timestring():
+def timestring() -> str:
     """Get the current datetime as an RFC 3339-compliant string"""
     # isoformat doesn't include the mandatory trailing 'Z' for UTC.
     return datetime.datetime.utcnow().isoformat() + 'Z'
@@ -456,11 +398,26 @@ class JSONEncoder(json.JSONEncoder):
             return float(obj)
         if isinstance(obj, (datetime.datetime, datetime.date, datetime.time)):
             return obj.isoformat()
+        if hasattr(obj, 'to_dict'):
+            # if we have a to_dict we should try to serialize the result of
+            # that!
+            obj = obj.to_dict()
+        return super().default(obj)
 
-        return super(JSONEncoder, self).default(obj)
+
+class ForgivingJSONEncoder(JSONEncoder):
+    def default(self, obj):
+        # let dbt's default JSON encoder handle it if possible, fallback to
+        # str()
+        try:
+            return super().default(obj)
+        except TypeError:
+            return str(obj)
 
 
-def translate_aliases(kwargs, aliases):
+def translate_aliases(
+    kwargs: Dict[str, Any], aliases: Dict[str, str]
+) -> Dict[str, Any]:
     """Given a dict of keyword arguments and a dict mapping aliases to their
     canonical values, canonicalize the keys in the kwargs dict.
 
@@ -468,7 +425,7 @@ def translate_aliases(kwargs, aliases):
         canonical key.
     :raises: `AliasException`, if a canonical key is defined more than once.
     """
-    result = {}
+    result: Dict[str, Any] = {}
 
     for given_key, value in kwargs.items():
         canonical_key = aliases.get(given_key, given_key)
@@ -485,3 +442,101 @@ def translate_aliases(kwargs, aliases):
         result[canonical_key] = value
 
     return result
+
+
+def _pluralize(string: Union[str, NodeType]) -> str:
+    try:
+        convert = NodeType(string)
+    except ValueError:
+        return f'{string}s'
+    else:
+        return convert.pluralize()
+
+
+def pluralize(count, string: Union[str, NodeType]):
+    pluralized: str = str(string)
+    if count != 1:
+        pluralized = _pluralize(string)
+    return f'{count} {pluralized}'
+
+
+def restrict_to(*restrictions):
+    """Create the metadata for a restricted dataclass field"""
+    return {'restrict': list(restrictions)}
+
+
+def coerce_dict_str(value: Any) -> Optional[Dict[str, Any]]:
+    """For annoying mypy reasons, this helper makes dealing with nested dicts
+    easier. You get either `None` if it's not a Dict[str, Any], or the
+    Dict[str, Any] you expected (to pass it to JsonSchemaMixin.from_dict(...)).
+    """
+    if (isinstance(value, dict) and all(isinstance(k, str) for k in value)):
+        return value
+    else:
+        return None
+
+
+# some types need to make constants available to the jinja context as
+# attributes, and regular properties only work with objects. maybe this should
+# be handled by the RelationProxy?
+
+class classproperty(object):
+    def __init__(self, func):
+        self.func = func
+
+    def __get__(self, obj, objtype):
+        return self.func(objtype)
+
+
+def format_bytes(num_bytes):
+    for unit in ['Bytes', 'KB', 'MB', 'GB', 'TB']:
+        if abs(num_bytes) < 1024.0:
+            return f"{num_bytes:3.1f} {unit}"
+        num_bytes /= 1024.0
+
+    return "> 1024 TB"
+
+
+# a little concurrent.futures.Executor for single-threaded mode
+class SingleThreadedExecutor(concurrent.futures.Executor):
+    def submit(*args, **kwargs):
+        # this basic pattern comes from concurrent.futures.Executor itself,
+        # but without handling the `fn=` form.
+        if len(args) >= 2:
+            self, fn, *args = args
+        elif not args:
+            raise TypeError(
+                "descriptor 'submit' of 'SingleThreadedExecutor' object needs "
+                "an argument"
+            )
+        else:
+            raise TypeError(
+                'submit expected at least 1 positional argument, '
+                'got %d' % (len(args) - 1)
+            )
+        fut = concurrent.futures.Future()
+        try:
+            result = fn(*args, **kwargs)
+        except Exception as exc:
+            fut.set_exception(exc)
+        else:
+            fut.set_result(result)
+        return fut
+
+
+class ThreadedArgs(Protocol):
+    single_threaded: bool
+
+
+class HasThreadingConfig(Protocol):
+    args: ThreadedArgs
+    threads: Optional[int]
+
+
+def executor(config: HasThreadingConfig) -> concurrent.futures.Executor:
+    if config.args.single_threaded:
+        return SingleThreadedExecutor()
+    else:
+        return concurrent.futures.ThreadPoolExecutor(
+            max_workers=config.threads
+        )
